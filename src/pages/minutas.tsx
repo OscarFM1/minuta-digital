@@ -1,4 +1,5 @@
 // src/pages/minutas.tsx
+
 import type { NextPage } from 'next'
 import Head from 'next/head'
 import useSWR from 'swr'
@@ -9,9 +10,9 @@ import {
   Row,
   Col,
   Spinner,
-  Alert,
-  Button
+  Alert
 } from 'react-bootstrap'
+import { AttachmentsList } from '@/components/AttachmentsList'
 
 /**
  * Interfaz que describe la estructura de una minuta.
@@ -30,7 +31,6 @@ interface Minuta {
  */
 const fetcher = async (): Promise<Minuta[]> => {
   const { data, error } = await supabase
-    // PASAMOS 'minute' como literal y Minuta como tipo de fila
     .from<'minute', Minuta>('minute')
     .select('*')
     .order('date', { ascending: false })
@@ -43,7 +43,7 @@ const fetcher = async (): Promise<Minuta[]> => {
  * MinutasPage
  *
  * Muestra un listado de todas las minutas en cards,
- * con enlace directo a las evidencias subidas.
+ * con lista dinámica de evidencias.
  */
 const MinutasPage: NextPage = () => {
   const { data: minutas, error } = useSWR<Minuta[]>('minutas', fetcher)
@@ -88,22 +88,8 @@ const MinutasPage: NextPage = () => {
                   <Card.Text>{m.description}</Card.Text>
                   {m.notes && <Card.Text><em>{m.notes}</em></Card.Text>}
 
-                  {/* Si tuvieras el filename lo pasarías aquí; por ahora solo ejemplo */}
-                  <Button
-                    variant="outline-primary"
-                    size="sm"
-                    target="_blank"
-                    href={
-                      supabase
-                        .storage
-                        .from('attachments')
-                        .getPublicUrl(`${m.id}/nombre-de-tu-archivo.ext`)
-                        .data
-                        .publicUrl
-                    }
-                  >
-                    Ver evidencias
-                  </Button>
+                  <h6 className="mt-3">Evidencias:</h6>
+                  <AttachmentsList minuteId={m.id} />
                 </Card.Body>
               </Card>
             </Col>
