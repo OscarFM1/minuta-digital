@@ -34,9 +34,10 @@ interface FormValues {
  * - Subir evidencias (archivos).
  * 
  * Al enviar:
- * 1. Inserta en la tabla `minute`.
- * 2. Sube archivos a Supabase Storage.
- * 3. Registra metadatos en la tabla `attachment`.
+ * 1. Combina fecha+hora en timestamp ISO.
+ * 2. Inserta en la tabla `minute`.
+ * 3. Sube archivos a Supabase Storage.
+ * 4. Registra metadatos en la tabla `attachment`.
  */
 export function MinuteForm() {
   const [values, setValues] = useState<FormValues>({
@@ -75,15 +76,19 @@ export function MinuteForm() {
 
     setLoading(true)
     try {
-      // 1) Inserta la minuta
+      // 1) Combina fecha + hora en ISO timestamp
+      const startTimestamp = `${values.date}T${values.startTime}`
+      const endTimestamp   = `${values.date}T${values.endTime}`
+
+      // 2) Inserta la minuta
       const { data: minute, error: minErr } = await supabase
         .from('minute')
         .insert({
-          date: values.date,
-          start_time: values.startTime,
-          end_time: values.endTime,
+          date:       values.date,
+          start_time: startTimestamp,
+          end_time:   endTimestamp,
           description: values.description,
-          notes: values.notes || null,
+          notes:       values.notes || null,
         })
         .select('id')
         .single()
@@ -91,7 +96,7 @@ export function MinuteForm() {
 
       const minuteId = minute.id as string
 
-      // 2) Sube cada archivo y registra metadato
+      // 3) Sube cada archivo y registra metadato
       await Promise.all(
         Array.from(values.files).map(async file => {
           const path = `${minuteId}/${file.name}`
@@ -105,8 +110,8 @@ export function MinuteForm() {
             .from('attachment')
             .insert({
               minute_id: minuteId,
-              url: path,
-              filename: file.name,
+              url:        path,
+              filename:   file.name,
             })
         })
       )
