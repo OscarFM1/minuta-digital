@@ -2,7 +2,7 @@
 
 import type { NextPage } from 'next'
 import Head from 'next/head'
-import Link from 'next/link'
+import { useRouter } from 'next/router'
 import useSWR, { mutate } from 'swr'
 import { supabase } from '@/lib/supabaseClient'
 import {
@@ -36,6 +36,7 @@ const fetcher = async (): Promise<Minuta[]> => {
 }
 
 const MinutasPage: NextPage = () => {
+  const router = useRouter()
   const { data: minutas, error } = useSWR<Minuta[]>('minutas', fetcher)
 
   const handleDelete = async (minuteId: string) => {
@@ -57,6 +58,7 @@ const MinutasPage: NextPage = () => {
     // 3) Borrar la minuta
     await supabase.from('minute').delete().eq('id', minuteId)
 
+    // 4) Refrescar la lista
     mutate('minutas')
   }
 
@@ -100,11 +102,13 @@ const MinutasPage: NextPage = () => {
                   <AttachmentsList minuteId={m.id} />
 
                   <Stack direction="horizontal" gap={2} className="mt-3">
-                    <Link href={`/minutas/${m.id}`} passHref>
-                      <Button as="a" variant="outline-secondary" size="sm">
-                        Editar
-                      </Button>
-                    </Link>
+                    <Button
+                      variant="outline-secondary"
+                      size="sm"
+                      onClick={() => router.push(`/minutas/${m.id}`)}
+                    >
+                      Editar
+                    </Button>
                     <Button
                       variant="outline-danger"
                       size="sm"
