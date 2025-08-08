@@ -3,8 +3,8 @@
 import { useState, ChangeEvent, FormEvent, useEffect } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
+import Image from 'next/image'
 import {
-  Container,
   Card,
   Form,
   Button,
@@ -12,7 +12,7 @@ import {
   Spinner
 } from 'react-bootstrap'
 import { supabase } from '@/lib/supabaseClient'
-import styles from '@/styles/Login.module.css'  // <-- Importa tu módulo CSS
+import styles from '@/styles/Login.module.css'
 
 export default function LoginPage() {
   const router = useRouter()
@@ -38,8 +38,11 @@ export default function LoginPage() {
     })
     setLoading(false)
 
-    if (error) setError(error.message)
-    else       router.push('/minutas')
+    if (error) {
+      setError(error.message)
+    } else {
+      router.push('/minutas')
+    }
   }
 
   return (
@@ -47,52 +50,65 @@ export default function LoginPage() {
       <Head>
         <title>Iniciar Sesión – Minuta Digital</title>
       </Head>
-      <div className={styles.container}>
-        <Card className={styles.card}>
-          <Card.Body className="p-4">
-            <h2 className={styles.title}>Minuta Digital</h2>
-            {error && <Alert variant="danger">{error}</Alert>}
-            <Form onSubmit={handleSubmit}>
-
-              <Form.Group controlId="email" className="mb-3">
-                <Form.Label className={styles.label}>
-                  Correo Electrónico
-                </Form.Label>
-                <Form.Control
-                  type="email"
-                  placeholder="tu@empresa.com"
-                  value={email}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setEmail(e.target.value)}
-                  required
+      <div className={styles.wrapper}>
+        <div className={styles.left}></div>
+        <div className={styles.right}>
+          <Card className={styles.card}>
+            <Card.Body className="p-4">
+              <div className={styles.logo}>
+                <Image
+                  src="/img/logo.png"
+                  alt="Logo Empresa"
+                  width={180}
+                  height={80}
+                  quality={100}
+                  priority
+                  style={{ objectFit: 'contain' }}
                 />
-              </Form.Group>
+              </div>
+              <h2 className={styles.title}>Minuta Digital</h2>
+              {error && <Alert variant="danger">{error}</Alert>}
+              <Form onSubmit={handleSubmit}>
+                <Form.Group controlId="email" className="mb-3">
+                  <Form.Label className={styles.label}>
+                    Correo Electrónico
+                  </Form.Label>
+                  <Form.Control
+                    type="email"
+                    placeholder="tu@empresa.com"
+                    value={email}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setEmail(e.target.value)}
+                    required
+                  />
+                </Form.Group>
 
-              <Form.Group controlId="password" className="mb-4">
-                <Form.Label className={styles.label}>
-                  Contraseña
-                </Form.Label>
-                <Form.Control
-                  type="password"
-                  placeholder="••••••••"
-                  value={password}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
-                  required
-                />
-              </Form.Group>
+                <Form.Group controlId="password" className="mb-4">
+                  <Form.Label className={styles.label}>
+                    Contraseña
+                  </Form.Label>
+                  <Form.Control
+                    type="password"
+                    placeholder="••••••••"
+                    value={password}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setPassword(e.target.value)}
+                    required
+                  />
+                </Form.Group>
 
-              <Button
-                variant="primary"
-                type="submit"
-                className={styles.button}
-                disabled={loading}
-              >
-                {loading
-                  ? (<><Spinner animation="border" size="sm" /> Iniciando…</>)
-                  : 'Iniciar Sesión'}
-              </Button>
-            </Form>
-          </Card.Body>
-        </Card>
+                <Button
+                  variant="primary"
+                  type="submit"
+                  className={styles.button}
+                  disabled={loading}
+                >
+                  {loading
+                    ? (<><Spinner animation="border" size="sm" /> Iniciando…</>)
+                    : 'Iniciar Sesión'}
+                </Button>
+              </Form>
+            </Card.Body>
+          </Card>
+        </div>
       </div>
     </>
   )
