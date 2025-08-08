@@ -3,6 +3,7 @@
  * Página principal de minutas: header, filtros, grid responsive, acciones.
  * Autor: TuNombre
  */
+
 import React, { useState } from 'react'
 import { Container, Row, Col, Button, Modal } from 'react-bootstrap'
 import MinuteCard from '@/components/MinuteCard'
@@ -22,7 +23,7 @@ type Minute = {
 
 const fetchMinutes = async (filters: any) => {
   let query = supabase.from('minute').select('*').order('created_at', { ascending: false })
-  // Si hay filtros, aplicarlos:
+  // Si hay filtros, aplicarlos solo si tienen valor:
   if (filters?.desde) query = query.gte('fecha', filters.desde)
   if (filters?.hasta) query = query.lte('fecha', filters.hasta)
   // Si quieres filtrar por usuario, descomenta:
@@ -34,12 +35,12 @@ const fetchMinutes = async (filters: any) => {
 
 export default function MinutasPage() {
   const [filters, setFilters] = useState({})
-  const { data: minutas, isLoading, mutate } = useSWR(['minutas', filters], () => fetchMinutes(filters))
+  const { data: minutas, error, isLoading, mutate } = useSWR(['minutas', filters], () => fetchMinutes(filters))
   const [showDelete, setShowDelete] = useState(false)
   const [minutaToDelete, setMinutaToDelete] = useState<Minute | null>(null)
 
   // Manejar eliminación
-  async function handleDelete(minuta: Minute) {
+  function handleDelete(minuta: Minute) {
     setMinutaToDelete(minuta)
     setShowDelete(true)
   }
@@ -60,8 +61,9 @@ export default function MinutasPage() {
     window.location.href = '/minutas/nueva'
   }
 
-  function logout() {
-    supabase.auth.signOut()
+  // LOGOUT ASYNC
+  async function logout() {
+    await supabase.auth.signOut()
     window.location.href = '/login'
   }
 
@@ -75,8 +77,14 @@ export default function MinutasPage() {
         </Col>
       </Row>
       <MinutesFilter onChange={setFilters} />
+
+      {error && <p className="text-danger mt-3">Error al cargar minutas: {error.message}</p>}
+      {isLoading && <p className="mt-3">Cargando...</p>}
+      {!isLoading && !error && minutas?.length === 0 && (
+        <p className="mt-3">No hay minutas para mostrar.</p>
+      )}
+
       <Row xs={1} sm={2} md={3} lg={4} className="g-4">
-        {isLoading && <p>Cargando...</p>}
         {minutas?.map((minuta: Minute) => (
           <Col key={minuta.id}>
             <MinuteCard
