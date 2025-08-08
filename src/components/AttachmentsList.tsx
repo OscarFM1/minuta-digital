@@ -13,7 +13,7 @@ interface AttachmentsListProps {
   minuteId: string
 }
 
-export function AttachmentsList({ minuteId }: AttachmentsListProps) {
+const AttachmentsList: React.FC<AttachmentsListProps> = ({ minuteId }) => {
   const [files, setFiles]       = useState<FileItem[]>([])
   const [loading, setLoading]   = useState(true)
   const [error, setError]       = useState<string|null>(null)
@@ -71,3 +71,5 @@ export function AttachmentsList({ minuteId }: AttachmentsListProps) {
     </ListGroup>
   )
 }
+
+export default AttachmentsList

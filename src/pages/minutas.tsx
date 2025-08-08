@@ -22,8 +22,8 @@ type Minute = {
 }
 
 const fetchMinutes = async (filters: any) => {
-  let query = supabase.from('minute').select('*').order('created_at', { ascending: false })
-  // Si hay filtros, aplicarlos solo si tienen valor:
+  let query = supabase.from('minute').select('*').order('date', { ascending: false })
+// Si hay filtros, aplicarlos solo si tienen valor:
   if (filters?.desde) query = query.gte('fecha', filters.desde)
   if (filters?.hasta) query = query.lte('fecha', filters.hasta)
   // Si quieres filtrar por usuario, descomenta:
