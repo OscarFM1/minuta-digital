@@ -26,6 +26,18 @@ interface FormValues {
 }
 
 /**
+ * Props para MinuteForm:
+ * - modo: indica si el form es para crear o editar ('crear' | 'editar')
+ * - minutoId: requerido solo si modo === 'editar'
+ * - onSuccess: callback al finalizar (recibe el id de la minuta creada/actualizada)
+ */
+interface MinuteFormProps {
+  modo?: 'crear' | 'editar'
+  minutoId?: string
+  onSuccess?: (id: string) => void
+}
+
+/**
  * MinuteForm
  * 
  * Formulario para:
@@ -35,11 +47,15 @@ interface FormValues {
  * 
  * Al enviar:
  * 1. Combina fecha+hora en timestamp ISO.
- * 2. Inserta en la tabla `minute`.
+ * 2. Inserta (o actualiza) en la tabla `minute`.
  * 3. Sube archivos a Supabase Storage.
  * 4. Registra metadatos en la tabla `attachment`.
  */
-export function MinuteForm() {
+const MinuteForm: React.FC<MinuteFormProps> = ({
+  modo = 'crear',
+  minutoId,
+  onSuccess
+}) => {
   const [values, setValues] = useState<FormValues>({
     date: dayjs().format('YYYY-MM-DD'),
     startTime: dayjs().format('HH:mm'),
@@ -80,44 +96,52 @@ export function MinuteForm() {
       const startTimestamp = `${values.date}T${values.startTime}`
       const endTimestamp   = `${values.date}T${values.endTime}`
 
-      // 2) Inserta la minuta
-      const { data: minute, error: minErr } = await supabase
-        .from('minute')
-        .insert({
-          date:       values.date,
-          start_time: startTimestamp,
-          end_time:   endTimestamp,
-          description: values.description,
-          notes:       values.notes || null,
-        })
-        .select('id')
-        .single()
-      if (minErr || !minute) throw minErr || new Error('No se creó la minuta')
+      let minuteId = minutoId
 
-      const minuteId = minute.id as string
+      if (modo === 'crear') {
+        // 2a) Inserta la minuta
+        const { data: minute, error: minErr } = await supabase
+          .from('minute')
+          .insert({
+            date:       values.date,
+            start_time: startTimestamp,
+            end_time:   endTimestamp,
+            description: values.description,
+            notes:       values.notes || null,
+          })
+          .select('id')
+          .single()
+        if (minErr || !minute) throw minErr || new Error('No se creó la minuta')
+
+        minuteId = minute.id as string
+      }
+      // Para modo "editar", aquí podrías hacer UPDATE a la minuta si minutoId existe
 
       // 3) Sube cada archivo y registra metadato
-      await Promise.all(
-        Array.from(values.files).map(async file => {
-          const path = `${minuteId}/${file.name}`
-          const { error: uploadErr } = await supabase
-            .storage
-            .from('attachments')
-            .upload(path, file)
-          if (uploadErr) throw uploadErr
+      if (minuteId) {
+        await Promise.all(
+          Array.from(values.files).map(async file => {
+            const path = `${minuteId}/${file.name}`
+            const { error: uploadErr } = await supabase
+              .storage
+              .from('attachments')
+              .upload(path, file)
+            if (uploadErr) throw uploadErr
 
-          await supabase
-            .from('attachment')
-            .insert({
-              minute_id: minuteId,
-              url:        path,
-              filename:   file.name,
-            })
-        })
-      )
+            await supabase
+              .from('attachment')
+              .insert({
+                minute_id: minuteId,
+                url:        path,
+                filename:   file.name,
+              })
+          })
+        )
+      }
 
       setSuccess(true)
       setValues(prev => ({ ...prev, description: '', notes: '', files: null }))
+      if (onSuccess && minuteId) onSuccess(minuteId)
     } catch (err: any) {
       console.error(err)
       setError(err.message || 'Error al guardar la minuta.')
@@ -128,7 +152,7 @@ export function MinuteForm() {
 
   return (
     <Container className="my-4">
-      <h3>Registrar Minuta</h3>
+      <h3>{modo === 'crear' ? 'Registrar Minuta' : 'Editar Minuta'}</h3>
 
       {error   && <Alert variant="danger">{error}</Alert>}
       {success && <Alert variant="success">Minuta guardada correctamente.</Alert>}
@@ -216,9 +240,11 @@ export function MinuteForm() {
         >
           {loading
             ? (<><Spinner animation="border" size="sm" /> Guardando…</>)
-            : 'Guardar Minuta'}
+            : (modo === 'crear' ? 'Guardar Minuta' : 'Actualizar Minuta')}
         </Button>
       </Form>
     </Container>
   )
 }
+
+export default MinuteForm
