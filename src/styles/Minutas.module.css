@@ -1,0 +1,23 @@
+.bg {
+  background: #f7fafc;
+  min-height: 100vh;
+  padding-bottom: 3rem;
+}
+.title {
+  color: #024b9e;
+  font-family: 'Inter', sans-serif;
+  font-weight: 700;
+  letter-spacing: -1px;
+}
+.card {
+  border-radius: 16px;
+  box-shadow: 0 4px 20px rgba(1, 173, 237, 0.04);
+  transition: box-shadow 0.2s, border 0.2s;
+  border: 1.5px solid #e6eef7;
+  background: #fff;
+}
+.card:hover, .card:focus {
+  box-shadow: 0 8px 32px rgba(2, 75, 158, 0.10);
+  border: 1.5px solid #01aded;
+  outline: 2px solid #01aded;
+}

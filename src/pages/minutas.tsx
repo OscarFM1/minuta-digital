@@ -1,130 +1,103 @@
-// src/pages/minutas.tsx
-
-import type { NextPage } from 'next'
-import Head from 'next/head'
-import { useRouter } from 'next/router'
-import useSWR, { mutate } from 'swr'
+/**
+ * minutas.tsx
+ * Página principal de minutas: header, filtros, grid responsive, acciones.
+ * Autor: TuNombre
+ */
+import React, { useState } from 'react'
+import { Container, Row, Col, Button, Modal } from 'react-bootstrap'
+import MinuteCard from '@/components/MinuteCard'
+import MinutesFilter from '@/components/MinutesFilter'
+import useSWR from 'swr'
 import { supabase } from '@/lib/supabaseClient'
-import {
-  Container,
-  Card,
-  Row,
-  Col,
-  Spinner,
-  Alert,
-  Button,
-  Stack
-} from 'react-bootstrap'
-import { AttachmentsList } from '@/components/AttachmentsList'
+import styles from '@/styles/Minutas.module.css'
 
-interface Minuta {
+type Minute = {
   id: string
-  date: string
-  start_time: string
-  end_time: string
-  description: string
-  notes?: string | null
+  titulo?: string
+  fecha?: string
+  resumen?: string
+  responsable?: string
+  adjuntos?: number
 }
 
-const fetcher = async (): Promise<Minuta[]> => {
-  const { data, error } = await supabase
-    .from<'minute', Minuta>('minute')
-    .select('*')
-    .order('date', { ascending: false })
+const fetchMinutes = async (filters: any) => {
+  let query = supabase.from('minute').select('*').order('created_at', { ascending: false })
+  // Si hay filtros, aplicarlos:
+  if (filters?.desde) query = query.gte('fecha', filters.desde)
+  if (filters?.hasta) query = query.lte('fecha', filters.hasta)
+  // Si quieres filtrar por usuario, descomenta:
+  // if (filters?.usuario) query = query.eq('usuario', filters.usuario)
+  const { data, error } = await query
   if (error) throw error
-  return data ?? []
+  return data
 }
 
-const MinutasPage: NextPage = () => {
-  const router = useRouter()
-  const { data: minutas, error } = useSWR<Minuta[]>('minutas', fetcher)
+export default function MinutasPage() {
+  const [filters, setFilters] = useState({})
+  const { data: minutas, isLoading, mutate } = useSWR(['minutas', filters], () => fetchMinutes(filters))
+  const [showDelete, setShowDelete] = useState(false)
+  const [minutaToDelete, setMinutaToDelete] = useState<Minute | null>(null)
 
-  const handleDelete = async (minuteId: string) => {
-    if (!confirm('¿Seguro que quieres eliminar esta minuta y sus evidencias?')) return
-
-    // 1) Borrar metadatos
-    await supabase.from('attachment').delete().eq('minute_id', minuteId)
-
-    // 2) Borrar archivos del bucket
-    const { data: files } = await supabase
-      .storage
-      .from('attachments')
-      .list(minuteId)
-    if (files && files.length) {
-      const paths = files.map(f => `${minuteId}/${f.name}`)
-      await supabase.storage.from('attachments').remove(paths)
-    }
-
-    // 3) Borrar la minuta
-    await supabase.from('minute').delete().eq('id', minuteId)
-
-    // 4) Refrescar la lista
-    mutate('minutas')
+  // Manejar eliminación
+  async function handleDelete(minuta: Minute) {
+    setMinutaToDelete(minuta)
+    setShowDelete(true)
+  }
+  async function confirmDelete() {
+    if (!minutaToDelete) return
+    // Elimina attachments y minuta (borrado en cascada si lo tienes en backend)
+    await supabase.from('minute').delete().eq('id', minutaToDelete.id)
+    setShowDelete(false)
+    setMinutaToDelete(null)
+    mutate() // Refresca listado
   }
 
-  if (error) {
-    return (
-      <Container className="my-5">
-        <Alert variant="danger">Error cargando minutas: {error.message}</Alert>
-      </Container>
-    )
+  function handleEdit(minuta: Minute) {
+    window.location.href = `/minutas/${minuta.id}`
   }
-  if (!minutas) {
-    return (
-      <Container className="text-center my-5">
-        <Spinner animation="border" />
-      </Container>
-    )
+
+  function handleNuevaMinuta() {
+    window.location.href = '/minutas/nueva'
+  }
+
+  function logout() {
+    supabase.auth.signOut()
+    window.location.href = '/login'
   }
 
   return (
-    <>
-      <Head>
-        <title>Listado de Minutas</title>
-      </Head>
-      <Container className="my-4">
-        <h2>Listado de Minutas</h2>
-        <Row>
-          {minutas.map(m => (
-            <Col md={4} key={m.id} className="mb-3">
-              <Card>
-                <Card.Body>
-                  <Card.Title>
-                    {new Date(m.date).toLocaleDateString()}
-                  </Card.Title>
-                  <Card.Subtitle className="mb-2 text-muted">
-                    {m.start_time.slice(11,16)} – {m.end_time.slice(11,16)}
-                  </Card.Subtitle>
-                  <Card.Text>{m.description}</Card.Text>
-                  {m.notes && <Card.Text><em>{m.notes}</em></Card.Text>}
-
-                  <h6 className="mt-3">Evidencias:</h6>
-                  <AttachmentsList minuteId={m.id} />
-
-                  <Stack direction="horizontal" gap={2} className="mt-3">
-                    <Button
-                      variant="outline-secondary"
-                      size="sm"
-                      onClick={() => router.push(`/minutas/${m.id}`)}
-                    >
-                      Editar
-                    </Button>
-                    <Button
-                      variant="outline-danger"
-                      size="sm"
-                      onClick={() => handleDelete(m.id)}
-                    >
-                      Eliminar
-                    </Button>
-                  </Stack>
-                </Card.Body>
-              </Card>
-            </Col>
-          ))}
-        </Row>
-      </Container>
-    </>
+    <Container fluid className={styles.bg}>
+      <Row className="justify-content-between align-items-center mt-5 mb-3">
+        <Col><h1 className={styles.title}>Minutas</h1></Col>
+        <Col xs="auto">
+          <Button variant="primary" onClick={handleNuevaMinuta}>Nueva minuta</Button>
+          <Button variant="outline-secondary" className="ms-2" onClick={logout}>Cerrar sesión</Button>
+        </Col>
+      </Row>
+      <MinutesFilter onChange={setFilters} />
+      <Row xs={1} sm={2} md={3} lg={4} className="g-4">
+        {isLoading && <p>Cargando...</p>}
+        {minutas?.map((minuta: Minute) => (
+          <Col key={minuta.id}>
+            <MinuteCard
+              minuta={minuta}
+              onEdit={handleEdit}
+              onDelete={handleDelete}
+            />
+          </Col>
+        ))}
+      </Row>
+      {/* Modal de confirmación para eliminar */}
+      <Modal show={showDelete} onHide={() => setShowDelete(false)}>
+        <Modal.Header closeButton>
+          <Modal.Title>Confirmar eliminación</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>¿Seguro que deseas eliminar esta minuta? Esta acción no se puede deshacer.</Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" onClick={() => setShowDelete(false)}>Cancelar</Button>
+          <Button variant="danger" onClick={confirmDelete}>Eliminar</Button>
+        </Modal.Footer>
+      </Modal>
+    </Container>
   )
 }
-
-export default MinutasPage
