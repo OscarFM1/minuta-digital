@@ -32,17 +32,11 @@ export default function LoginPage() {
     setError(null)
     setLoading(true)
 
-    const { error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    })
+    const { error } = await supabase.auth.signInWithPassword({ email, password })
     setLoading(false)
 
-    if (error) {
-      setError(error.message)
-    } else {
-      router.push('/minutas')
-    }
+    if (error) setError(error.message)
+    else router.push('/minutas')
   }
 
   return (
@@ -51,21 +45,25 @@ export default function LoginPage() {
         <title>Iniciar Sesión – Minuta Digital</title>
       </Head>
       <div className={styles.wrapper}>
-        <div className={styles.left}></div>
+        <div className={styles.left} />
         <div className={styles.right}>
           <Card className={styles.card}>
+            {/* Header en blanco */}
+            <div className={styles.cardHeader} />
+
             <Card.Body className="p-4">
               <div className={styles.logo}>
                 <Image
                   src="/img/logo.png"
                   alt="Logo Empresa"
-                  width={180}
-                  height={80}
+                  width={240}
+                  height={100}
                   quality={100}
                   priority
                   style={{ objectFit: 'contain' }}
                 />
               </div>
+
               <h2 className={styles.title}>Minuta Digital</h2>
               {error && <Alert variant="danger">{error}</Alert>}
               <Form onSubmit={handleSubmit}>
@@ -96,7 +94,6 @@ export default function LoginPage() {
                 </Form.Group>
 
                 <Button
-                  variant="primary"
                   type="submit"
                   className={styles.button}
                   disabled={loading}

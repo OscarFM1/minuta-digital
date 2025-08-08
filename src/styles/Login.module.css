@@ -1,6 +1,5 @@
 /* src/styles/Login.module.css */
 
-/* Layout general: dos columnas en desktop, una en mobile */
 .wrapper {
   display: flex;
   min-height: 100vh;
@@ -28,31 +27,34 @@
   }
 }
 
-/* Card estilizado */
 .card {
   width: 100%;
   max-width: 400px;
   border: none;
   border-radius: 1rem;
+  overflow: hidden;
   box-shadow: 0 0.5rem 1rem rgba(0,0,0,0.15);
+  background: #fff;
 }
 
-/* Logo centrado, con tamaño y fit adecuado */
-.logo {
+.cardHeader {
+  background: linear-gradient(135deg,  #01aded 0%, #024b9e 100%);
+  padding: 1.5rem;
   display: flex;
   justify-content: center;
-  margin-bottom: 1rem;
-  width: 180px;      /* ancho fijo que se corresponde con tu imagen real */
-  height: 80px;      /* alto fijo según la proporción de tu logo */
+}
+
+.logo {
+  width: 240px;
+  height: 100px;
 }
 
 .logo :global(img) {
-  object-fit: contain;  /* asegura que la imagen ocupe todo el contenedor sin deformarse */
+  object-fit: contain;
   width: 100%;
   height: 100%;
 }
 
-/* Título de la app */
 .title {
   text-align: center;
   margin-bottom: 1.5rem;
@@ -60,14 +62,18 @@
   color: #333;
 }
 
-/* Labels con peso medio */
 .label {
   font-weight: 500;
 }
 
-/* Botón principal */
 .button {
   width: 100%;
   padding: 0.75rem;
   font-weight: 600;
+  background: #024b9e;
+  border: none;
+}
+
+.button:hover {
+  background: #01aded;
 }
