@@ -14,23 +14,34 @@ import styles from '@/styles/Minutas.module.css'
 
 type Minute = {
   id: string
-  titulo?: string
-  fecha?: string
-  resumen?: string
-  responsable?: string
+  date?: string
+  start_time?: string
+  end_time?: string
+  description?: string
+  notes?: string
   adjuntos?: number
 }
 
 const fetchMinutes = async (filters: any) => {
-  let query = supabase.from('minute').select('*').order('date', { ascending: false })
-// Si hay filtros, aplicarlos solo si tienen valor:
-  if (filters?.desde) query = query.gte('fecha', filters.desde)
-  if (filters?.hasta) query = query.lte('fecha', filters.hasta)
+  let query = supabase
+    .from('minute')
+    .select('*, attachment(count)')
+    .order('date', { ascending: false })
+
+  // Aplica los filtros si existen y tienen valor
+  if (filters?.desde) query = query.gte('date', filters.desde)
+  if (filters?.hasta) query = query.lte('date', filters.hasta)
   // Si quieres filtrar por usuario, descomenta:
   // if (filters?.usuario) query = query.eq('usuario', filters.usuario)
+
   const { data, error } = await query
   if (error) throw error
-  return data
+
+  // Mapear resultado para agregar el conteo de adjuntos
+  return data.map((m: any) => ({
+    ...m,
+    adjuntos: m.attachment?.[0]?.count ?? 0,
+  }))
 }
 
 export default function MinutasPage() {
