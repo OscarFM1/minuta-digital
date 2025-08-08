@@ -1,0 +1,38 @@
+/* Login.module.css */
+
+/* Fondo degradado a 135° */
+.container {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Card centrada y estilizada */
+.card {
+  max-width: 400px;
+  width: 100%;
+  border: none;
+  border-radius: 1rem;
+  box-shadow: 0 0.5rem 1rem rgba(0,0,0,0.15);
+}
+
+/* Título de la app */
+.title {
+  text-align: center;
+  margin-bottom: 1.5rem;
+  font-weight: 600;
+}
+
+/* Botón principal */
+.button {
+  width: 100%;
+  padding: 0.75rem;
+  font-weight: 600;
+}
+
+/* Etiquetas con un poco más de peso */
+.label {
+  font-weight: 500;
+}
