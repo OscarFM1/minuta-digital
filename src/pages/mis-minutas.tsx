@@ -1,5 +1,8 @@
-import React, { useState, useEffect } from 'react'
-import { useRouter } from 'next/router'
+/**
+ * mis-minutas.tsx
+ * Vista para usuarios normales: ven/crean/editan SOLO sus minutas (RLS hace el filtro).
+ */
+import React, { useState } from 'react'
 import { Container, Row, Col, Button, Modal } from 'react-bootstrap'
 import MinuteCard from '@/components/MinuteCard'
 import MinutesFilter from '@/components/MinutesFilter'
@@ -17,88 +20,55 @@ type Minute = {
   adjuntos?: number
 }
 
-type Filters = {
-  desde?: string
-  hasta?: string
-  usuario?: string
-}
+type Filters = { desde?: string; hasta?: string }
 
-const fetchMinutes = async (filters: Filters): Promise<Minute[]> => {
-  // Traemos solo las columnas necesarias + el count de la relación attachment
+const fetchMyMinutes = async (filters: Filters): Promise<Minute[]> => {
   let query = supabase
     .from('minute')
     .select('id,date,start_time,end_time,description,notes,attachment(count)')
     .order('date', { ascending: false })
 
-  // Aplica filtros solo si tienen valor
   if (filters?.desde) query = query.gte('date', filters.desde)
   if (filters?.hasta) query = query.lte('date', filters.hasta)
-  // if (filters?.usuario) query = query.eq('usuario', filters.usuario)
 
   const { data, error } = await query
   if (error) throw error
 
-  // `attachment(count)` retorna algo como: attachment: [{ count: X }]
+  // RLS ya limita a "solo mis minutas"
   return (data ?? []).map((m: any) => ({
     ...m,
     adjuntos: m?.attachment?.[0]?.count ?? 0,
   }))
 }
 
-export default function MinutasPage() {
+export default function MisMinutasPage() {
   const [filters, setFilters] = useState<Filters>({})
   const { data: minutas, error, isLoading, mutate } = useSWR<Minute[]>(
-    ['minutas', filters],
-    () => fetchMinutes(filters)
+    ['mis-minutas', filters],
+    () => fetchMyMinutes(filters)
   )
 
   const [showDelete, setShowDelete] = useState(false)
   const [minutaToDelete, setMinutaToDelete] = useState<Minute | null>(null)
 
-  // AUTORIZACIÓN DE USUARIO (solo admin operaciones)
-  const router = useRouter()
-  const [checkingAuth, setCheckingAuth] = useState(true)
-
-  useEffect(() => {
-  const checkUser = async () => {
-    const { data } = await supabase.auth.getUser()
-    const email = data?.user?.email
-    if (email !== 'operaciones@multi-impresos.com') {
-      router.replace('/mis-minutas')   // <-- antes lo mandabas a /login
-      return
-    }
-    setCheckingAuth(false)
-  }
-  checkUser()
-}, [router])
-
-
-  if (checkingAuth) {
-    return <p className="mt-4">Verificando permisos...</p>
-  }
-
-  // Manejar eliminación
   function handleDelete(minuta: Minute) {
     setMinutaToDelete(minuta)
     setShowDelete(true)
   }
-
   async function confirmDelete() {
     if (!minutaToDelete) return
     await supabase.from('minute').delete().eq('id', minutaToDelete.id)
     setShowDelete(false)
     setMinutaToDelete(null)
-    mutate() // Refresca listado
+    mutate()
   }
 
   function handleEdit(minuta: Minute) {
     window.location.href = `/minutas/${minuta.id}`
   }
-
   function handleNuevaMinuta() {
     window.location.href = '/minutas/nueva'
   }
-
   async function logout() {
     await supabase.auth.signOut()
     window.location.href = '/login'
@@ -107,7 +77,7 @@ export default function MinutasPage() {
   return (
     <Container fluid className={styles.bg}>
       <Row className="justify-content-between align-items-center mt-5 mb-3">
-        <Col><h1 className={styles.title}>Minutas</h1></Col>
+        <Col><h1 className={styles.title}>Mis minutas</h1></Col>
         <Col xs="auto">
           <Button variant="primary" onClick={handleNuevaMinuta}>Nueva minuta</Button>
           <Button variant="outline-secondary" className="ms-2" onClick={logout}>Cerrar sesión</Button>
@@ -118,27 +88,18 @@ export default function MinutasPage() {
 
       {error && <p className="text-danger mt-3">Error al cargar minutas: {error.message}</p>}
       {isLoading && <p className="mt-3">Cargando...</p>}
-      {!isLoading && !error && (minutas?.length ?? 0) === 0 && (
-        <p className="mt-3">No hay minutas para mostrar.</p>
-      )}
+      {!isLoading && !error && (minutas?.length ?? 0) === 0 && <p className="mt-3">No hay minutas para mostrar.</p>}
 
       <Row xs={1} sm={2} md={3} lg={4} className="g-4">
         {minutas?.map((minuta) => (
           <Col key={minuta.id}>
-            <MinuteCard
-              minuta={minuta}
-              onEdit={handleEdit}
-              onDelete={handleDelete}
-            />
+            <MinuteCard minuta={minuta} onEdit={handleEdit} onDelete={handleDelete} />
           </Col>
         ))}
       </Row>
 
-      {/* Modal de confirmación para eliminar */}
       <Modal show={showDelete} onHide={() => setShowDelete(false)}>
-        <Modal.Header closeButton>
-          <Modal.Title>Confirmar eliminación</Modal.Title>
-        </Modal.Header>
+        <Modal.Header closeButton><Modal.Title>Confirmar eliminación</Modal.Title></Modal.Header>
         <Modal.Body>¿Seguro que deseas eliminar esta minuta? Esta acción no se puede deshacer.</Modal.Body>
         <Modal.Footer>
           <Button variant="secondary" onClick={() => setShowDelete(false)}>Cancelar</Button>
