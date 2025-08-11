@@ -5,30 +5,17 @@ import { createAttachmentRecords, createMinute, updateMinute, uploadAttachment }
 import type { Minute, MinuteFormValues, MinuteId } from '@/types/minute';
 import styles from '@/styles/Minutas.module.css';
 
-/**
- * Props del MinuteForm reutilizable.
- */
 interface MinuteFormProps {
   mode: 'create' | 'edit';
-  // Para edición
   minuteId?: MinuteId;
   initialValues?: MinuteFormValues;
-
-  // Callbacks
-  onSaved?: (minute: Minute) => void; // invocado tras crear/editar exitosamente
+  onSaved?: (minute: Minute) => void;
   onCancel?: () => void;
-
-  // Opciones
-  requireAttachmentOnCreate?: boolean; // default: true
-  enableAutosave?: boolean;            // default: true en edit
-  autosaveDelayMs?: number;            // default: 800
+  requireAttachmentOnCreate?: boolean;
+  enableAutosave?: boolean;
+  autosaveDelayMs?: number;
 }
 
-/**
- * Formulario de Minuta: crear o editar. Sin dependencias externas.
- * - En create: sube adjuntos a Storage y crea registros en 'attachment'.
- * - En edit: autoguarda con debounce los campos modificados.
- */
 export default function MinuteForm({
   mode,
   minuteId,
@@ -39,7 +26,6 @@ export default function MinuteForm({
   enableAutosave,
   autosaveDelayMs = 800,
 }: MinuteFormProps) {
-  // Valores iniciales
   const init = useMemo<MinuteFormValues>(
     () =>
       initialValues ?? {
@@ -51,22 +37,18 @@ export default function MinuteForm({
     [initialValues]
   );
 
-  // Estado controlado
   const [values, setValues] = useState<MinuteFormValues>(init);
   const [files, setFiles] = useState<File[]>([]);
   const [saving, setSaving] = useState(false);
   const [autoStatus, setAutoStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Por defecto, el autoguardado está activo en edición, apagado en creación.
   const autosaveEnabled = enableAutosave ?? (mode === 'edit');
 
   useEffect(() => {
-    // Si cambian initialValues externamente (SWR), resetea el form.
     setValues(init);
   }, [init]);
 
-  // Validaciones básicas
   const validate = (v: MinuteFormValues): string | null => {
     if (!v.tarea_realizada.trim()) return 'La "tarea realizada" no puede estar vacía.';
     if (v.start_time && v.end_time && v.end_time < v.start_time) {
@@ -78,12 +60,10 @@ export default function MinuteForm({
     return null;
   };
 
-  // Handler de cambio controlado
   const onChangeField = (key: keyof MinuteFormValues, value: string) => {
     setValues((prev) => ({ ...prev, [key]: value }));
   };
 
-  // --- AUTOGUARDADO (solo edit) ---
   const { debounced: debouncedAutosave } = useDebouncedCallback(async (snapshot: MinuteFormValues) => {
     if (!autosaveEnabled || mode !== 'edit' || !minuteId) return;
     const err = validate(snapshot);
@@ -103,7 +83,6 @@ export default function MinuteForm({
       setAutoStatus('saved');
       setErrorMsg(null);
       onSaved?.(updated);
-      // Limpia estado de "saved" tras un rato visual (opcional)
       setTimeout(() => setAutoStatus('idle'), 1200);
     } catch (e: any) {
       setAutoStatus('error');
@@ -113,12 +92,10 @@ export default function MinuteForm({
 
   useEffect(() => {
     if (mode !== 'edit' || !autosaveEnabled) return;
-    // Dispara autoguardado en cambios de campos
     debouncedAutosave(values);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [values.start_time, values.end_time, values.tarea_realizada, values.novedades]);
 
-  // Submit manual (create o edit)
   const onSubmit = async () => {
     const err = validate(values);
     if (err) {
@@ -131,16 +108,13 @@ export default function MinuteForm({
 
     try {
       if (mode === 'create') {
-        // 1) Crear la minuta
         const created = await createMinute(values);
-        // 2) Subir adjuntos (si hay)
         if (files.length > 0) {
           const paths: string[] = [];
           for (const f of files) {
             const path = await uploadAttachment(f, created.id);
             paths.push(path);
           }
-          // 3) Crear registros en 'attachment'
           await createAttachmentRecords(created.id, paths);
         }
         onSaved?.(created);
@@ -239,11 +213,20 @@ export default function MinuteForm({
           </span>
         )}
         {onCancel && (
-          <button type="button" onClick={onCancel} disabled={saving}>
+          <button
+            type="button"
+            className={styles.secondaryBtn}
+            onClick={onCancel}
+            disabled={saving}
+          >
             Cancelar
           </button>
         )}
-        <button type="submit" disabled={saving}>
+        <button
+          type="submit"
+          className={styles.primaryBtn}
+          disabled={saving}
+        >
           {saving ? 'Guardando…' : mode === 'create' ? 'Crear minuta' : 'Guardar'}
         </button>
       </div>
