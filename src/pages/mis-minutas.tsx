@@ -5,6 +5,7 @@
  * - Modo de tarjeta: "edit" (muestra Editar/Eliminar).
  * - Botón "Nueva minuta" (CTA principal).
  * - Si es admin, se redirige a /minutas.
+ * - **Nuevo**: mostrar el nombre del usuario en cada card (user_name).
  */
 
 import React, { useEffect, useState } from 'react'
@@ -37,13 +38,27 @@ type MinuteRow = {
   description?: string
   notes?: string | null
   attachment?: { count: number }[]
+  // 👇 Campos agregados en paso 2 para mostrar autor en card
+  created_by_name?: string | null
+  created_by_email?: string | null
 }
 
 /** Fetch de minutas del usuario (RLS aplica en el backend) */
 const fetchMyMinutes = async (filters: Filters): Promise<MinuteCardData[]> => {
   let query = supabase
     .from('minute')
-    .select('id,user_id,date,start_time,end_time,description,notes,attachment(count)')
+    .select(`
+      id,
+      user_id,
+      date,
+      start_time,
+      end_time,
+      description,
+      notes,
+      created_by_name,
+      created_by_email,
+      attachment(count)
+    `)
     .order('date', { ascending: false })
     .order('id', { ascending: false })
 
@@ -61,7 +76,8 @@ const fetchMyMinutes = async (filters: Filters): Promise<MinuteCardData[]> => {
     description: m.description,
     notes: m.notes ?? undefined,
     adjuntos: m.attachment?.[0]?.count ?? 0,
-    // (opcional) user_name no aplica aquí; MinuteCard lo maneja opcional
+    // 👇 Mostramos el nombre en la card (fallback al email si no hay nombre)
+    user_name: m.created_by_name || m.created_by_email || 'Sin nombre',
   }))
 }
 
@@ -185,7 +201,11 @@ export default function MisMinutasPage() {
           <Col key={minuta.id}>
             <MinuteCard
               minuta={minuta}
-              mode="edit"        // muestra Editar/Eliminar
+              // 👇 Usamos "edit" para mostrar Editar/Eliminar
+              mode="edit"
+              // 👇 Pasamos isAdmin para que MinuteCard muestre user_name.
+              // (Si luego quieres mostrarlo siempre, quita la condición en MinuteCard y elimina esta prop)
+              isAdmin
               onView={handleView}
               onEdit={handleEdit}
               onDelete={askDelete}
