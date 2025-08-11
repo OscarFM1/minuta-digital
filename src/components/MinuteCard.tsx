@@ -1,113 +1,127 @@
 /**
- * MinuteCard.tsx
- * Tarjeta visual de una minuta individual, reutilizable en diferentes contextos.
+ * src/components/MinuteCard.tsx
  *
- * Modos de acción:
- *  - mode="read":    Solo muestra botón "Ver detalles" (ideal para vista admin SOLO LECTURA).
- *  - mode="owner":   Muestra "Editar" y "Eliminar" (ideal para el dueño, p.ej. /mis-minutas).
+ * Tarjeta para mostrar una minuta.
+ * - Muestra: fecha, rango de horas, descripción y # de adjuntos.
+ * - Siempre pinta el nombre del usuario (user_name) si está disponible.
+ * - Acciones según `mode`:
+ *      "read"      → solo Ver detalles
+ *      "edit"      → Ver, Editar, Eliminar
+ *      "view-only" → sin acciones, solo info
  *
- * Props:
- *  - minuta:  datos mínimos de la minuta (MinuteCardData)
- *  - mode?:   'read' | 'owner'  (default: 'owner')
- *  - onView?:   (minuta) => void
- *  - onEdit?:   (minuta) => void
- *  - onDelete?: (minuta) => void
- *
- * Nota de tipos:
- *  - Usamos un tipo “de presentación” (MinuteCardData) con `user_id?` opcional para
- *    evitar conflictos cuando una página define un tipo más rico (con user_id obligatorio).
- *  - Las páginas pueden castear de vuelta si necesitan `user_id` requerido.
+ * Notas de implementación:
+ * - Usamos dayjs (sin dependencias nuevas).
+ * - Formateo robusto: si `start_time` o `end_time` vienen como "HH:mm" o como ISO,
+ *   igual los mostramos bien.
  */
 
-import { Card, Button } from 'react-bootstrap'
-import styles from '@/styles/Minutas.module.css'
+import React from 'react'
+import { Card, Button, Badge } from 'react-bootstrap'
+import dayjs from 'dayjs'
 
-/** Tipo mínimo que la card necesita para renderizar. */
+/** Estructura de datos que recibe la card */
 export type MinuteCardData = {
   id: string
-  user_id?: string               // opcional para no chocar con páginas que no lo tengan
-  date?: string
-  start_time?: string
-  end_time?: string
+  date?: string            // Ej. "2025-08-09"
+  start_time?: string      // Puede ser "HH:mm" o "YYYY-MM-DDTHH:mm"
+  end_time?: string        // Puede ser "HH:mm" o "YYYY-MM-DDTHH:mm"
   description?: string
   notes?: string
   adjuntos?: number
+  user_name?: string       // Nombre de quien registró la minuta
 }
 
-interface MinuteCardProps {
+/** Props del componente */
+type Props = {
   minuta: MinuteCardData
-  mode?: 'read' | 'owner'
-  onView?: (minuta: MinuteCardData) => void
-  onEdit?: (minuta: MinuteCardData) => void
-  onDelete?: (minuta: MinuteCardData) => void
+  mode?: 'read' | 'edit' | 'view-only'
+  onView?: (id: string) => void
+  onEdit?: (id: string) => void
+  onDelete?: (id: string) => void
+}
+
+/** Helper: formatea "HH:mm" o ISO → "hh:mm a" (10:30 a. m.) */
+function fmtTime(value?: string): string {
+  if (!value) return '—'
+
+  // Si viene solo "HH:mm", lo parseamos como hoy a esa hora
+  if (value.length <= 5) {
+    const parsed = dayjs(`2000-01-01T${value}`)
+    return parsed.isValid() ? parsed.format('hh:mm a') : '—'
+  }
+
+  // Si viene ISO (o fecha+hora), lo formateamos directo
+  const d = dayjs(value)
+  return d.isValid() ? d.format('hh:mm a') : '—'
+}
+
+/** Helper: formatea "YYYY-MM-DD" → "DD/MM/YYYY" */
+function fmtDate(value?: string): string {
+  if (!value) return 'Sin fecha'
+  const d = dayjs(value)
+  return d.isValid() ? d.format('DD/MM/YYYY') : 'Sin fecha'
 }
 
 export default function MinuteCard({
   minuta,
-  mode = 'owner',
+  mode = 'read',
   onView,
   onEdit,
   onDelete,
-}: MinuteCardProps) {
-  // Formatos amigables
-  const titulo = minuta.description || 'Sin título'
-  const fecha = minuta.date
-    ? new Date(minuta.date).toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' })
-    : 'Sin fecha'
-  const hora = (iso?: string) =>
-    iso ? new Date(iso).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' }) : '--:--'
-  const resumen = minuta.notes || 'Sin resumen'
-  const adjuntos = typeof minuta.adjuntos === 'number' ? minuta.adjuntos : 0
+}: Props) {
+  const fechaStr = fmtDate(minuta.date)
+  const horaIni  = fmtTime(minuta.start_time)
+  const horaFin  = fmtTime(minuta.end_time)
+  const countAdj = typeof minuta.adjuntos === 'number' ? minuta.adjuntos : 0
 
   return (
-    <Card className={styles.card} role="article" tabIndex={0} aria-label={`Minuta ${titulo}`}>
+    <Card className="h-100 shadow-sm">
       <Card.Body>
-        <Card.Title>{titulo}</Card.Title>
-        <Card.Subtitle className="mb-2 text-muted">
-          {fecha} ({hora(minuta.start_time)} - {hora(minuta.end_time)})
-        </Card.Subtitle>
+        {/* Fecha y horas */}
+        <Card.Title className="mb-1">
+          <strong>{fechaStr}</strong> · {horaIni} – {horaFin}
+        </Card.Title>
 
-        <Card.Text>
-          {resumen.length > 100 ? `${resumen.slice(0, 100)}…` : resumen}
+        {/* Nombre de quien registró (si existe) */}
+        {minuta.user_name && (
+          <p className="text-muted mb-2" style={{ fontSize: '0.9rem' }}>
+            Registrado por: <strong>{minuta.user_name}</strong>
+          </p>
+        )}
+
+        {/* Descripción */}
+        <Card.Text className="mb-2">
+          {minuta.description || 'Sin descripción'}
         </Card.Text>
 
-        <div className="d-flex justify-content-between align-items-center">
-          <small>{adjuntos} adjunto{adjuntos === 1 ? '' : 's'}</small>
+        {/* Adjuntos */}
+        <Badge bg="light" text="dark">
+          {countAdj} adjunto{countAdj !== 1 ? 's' : ''}
+        </Badge>
+      </Card.Body>
 
-          {mode === 'read' ? (
-            <div>
-              <Button
-                size="sm"
-                variant="outline-primary"
-                onClick={() => onView?.(minuta)}
-                aria-label="Ver detalles de la minuta"
-              >
-                Ver detalles
-              </Button>
-            </div>
-          ) : (
-            <div>
-              <Button
-                size="sm"
-                variant="outline-primary"
-                onClick={() => onEdit?.(minuta)}
-                aria-label="Editar minuta"
-              >
+      {/* Acciones según modo */}
+      <Card.Footer className="bg-white border-top-0 d-flex flex-wrap gap-2">
+        {mode !== 'view-only' && onView && (
+          <Button variant="primary" size="sm" onClick={() => onView(minuta.id)}>
+            Ver detalles
+          </Button>
+        )}
+        {mode === 'edit' && (
+          <>
+            {onEdit && (
+              <Button variant="secondary" size="sm" onClick={() => onEdit(minuta.id)}>
                 Editar
               </Button>
-              <Button
-                size="sm"
-                variant="outline-danger"
-                className="ms-2"
-                onClick={() => onDelete?.(minuta)}
-                aria-label="Eliminar minuta"
-              >
+            )}
+            {onDelete && (
+              <Button variant="danger" size="sm" onClick={() => onDelete(minuta.id)}>
                 Eliminar
               </Button>
-            </div>
-          )}
-        </div>
-      </Card.Body>
+            )}
+          </>
+        )}
+      </Card.Footer>
     </Card>
   )
 }
