@@ -1,6 +1,20 @@
+/**
+ * /minutas
+ * Vista de ADMIN (operaciones@multi-impresos.com) en modo SOLO LECTURA.
+ *
+ * Comportamiento:
+ *  - Lista TODAS las minutas (gracias a policy SELECT para admin).
+ *  - No permite crear, editar ni eliminar desde esta vista.
+ *  - Cada tarjeta solo muestra "Ver detalles", que navega a /minutas/[id].
+ *
+ * Seguridad:
+ *  - UI guard: si no es admin → redirige a /mis-minutas.
+ *  - RLS recomendado: policy SELECT para admin en minute/attachment.
+ */
+
 import React, { useState, useEffect } from 'react'
 import { useRouter } from 'next/router'
-import { Container, Row, Col, Button, Modal } from 'react-bootstrap'
+import { Container, Row, Col, Button } from 'react-bootstrap'
 import MinuteCard from '@/components/MinuteCard'
 import MinutesFilter from '@/components/MinutesFilter'
 import useSWR from 'swr'
@@ -20,25 +34,23 @@ type Minute = {
 type Filters = {
   desde?: string
   hasta?: string
-  usuario?: string
 }
 
+const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
+
 const fetchMinutes = async (filters: Filters): Promise<Minute[]> => {
-  // Traemos solo las columnas necesarias + el count de la relación attachment
+  // Traemos columnas necesarias + count de attachments
   let query = supabase
     .from('minute')
     .select('id,date,start_time,end_time,description,notes,attachment(count)')
     .order('date', { ascending: false })
 
-  // Aplica filtros solo si tienen valor
   if (filters?.desde) query = query.gte('date', filters.desde)
   if (filters?.hasta) query = query.lte('date', filters.hasta)
-  // if (filters?.usuario) query = query.eq('usuario', filters.usuario)
 
   const { data, error } = await query
   if (error) throw error
 
-  // `attachment(count)` retorna algo como: attachment: [{ count: X }]
   return (data ?? []).map((m: any) => ({
     ...m,
     adjuntos: m?.attachment?.[0]?.count ?? 0,
@@ -46,55 +58,34 @@ const fetchMinutes = async (filters: Filters): Promise<Minute[]> => {
 }
 
 export default function MinutasPage() {
+  const router = useRouter()
   const [filters, setFilters] = useState<Filters>({})
-  const { data: minutas, error, isLoading, mutate } = useSWR<Minute[]>(
+  const { data: minutas, error, isLoading } = useSWR<Minute[]>(
     ['minutas', filters],
     () => fetchMinutes(filters)
   )
 
-  const [showDelete, setShowDelete] = useState(false)
-  const [minutaToDelete, setMinutaToDelete] = useState<Minute | null>(null)
-
-  // AUTORIZACIÓN DE USUARIO (solo admin operaciones)
-  const router = useRouter()
+  // Guard: solo admin
   const [checkingAuth, setCheckingAuth] = useState(true)
-
   useEffect(() => {
     const checkUser = async () => {
       const { data } = await supabase.auth.getUser()
       const email = data?.user?.email
-      if (email !== 'operaciones@multi-impresos.com') {
-        router.replace('/mis-minutas') // usuarios normales → su vista
+      if (email !== ADMIN_EMAIL) {
+        router.replace('/mis-minutas')
         return
       }
-      setCheckingAuth(false) // admin confirmado
+      setCheckingAuth(false)
     }
     checkUser()
   }, [router])
 
-  if (checkingAuth) {
-    return <p className="mt-4">Verificando permisos...</p>
-  }
+  if (checkingAuth) return <p className="mt-4">Verificando permisos…</p>
 
-  // Manejar eliminación (OJO: si quieres admin solo-lectura total, luego quitamos también eliminar/editar)
-  function handleDelete(minuta: Minute) {
-    setMinutaToDelete(minuta)
-    setShowDelete(true)
+  // Navegar al detalle en modo lectura
+  function handleView(minuta: Minute) {
+    router.push(`/minutas/${minuta.id}`)
   }
-
-  async function confirmDelete() {
-    if (!minutaToDelete) return
-    await supabase.from('minute').delete().eq('id', minutaToDelete.id)
-    setShowDelete(false)
-    setMinutaToDelete(null)
-    mutate() // Refresca listado
-  }
-
-  function handleEdit(minuta: Minute) {
-    window.location.href = `/minutas/${minuta.id}`
-  }
-
-  // Nota: eliminamos handleNuevaMinuta porque el admin no puede crear
 
   async function logout() {
     await supabase.auth.signOut()
@@ -106,7 +97,7 @@ export default function MinutasPage() {
       <Row className="justify-content-between align-items-center mt-5 mb-3">
         <Col><h1 className={styles.title}>Minutas</h1></Col>
         <Col xs="auto">
-          {/* Admin SOLO lectura: sin botón de creación */}
+          {/* Admin SOLO LECTURA: sin botón de creación */}
           <Button variant="outline-secondary" onClick={logout}>Cerrar sesión</Button>
         </Col>
       </Row>
@@ -114,7 +105,7 @@ export default function MinutasPage() {
       <MinutesFilter onChange={setFilters} />
 
       {error && <p className="text-danger mt-3">Error al cargar minutas: {error.message}</p>}
-      {isLoading && <p className="mt-3">Cargando...</p>}
+      {isLoading && <p className="mt-3">Cargando…</p>}
       {!isLoading && !error && (minutas?.length ?? 0) === 0 && (
         <p className="mt-3">No hay minutas para mostrar.</p>
       )}
@@ -124,24 +115,12 @@ export default function MinutasPage() {
           <Col key={minuta.id}>
             <MinuteCard
               minuta={minuta}
-              onEdit={handleEdit}
-              onDelete={handleDelete}
+              mode="read"            // 👈 SOLO lectura (muestra “Ver detalles”)
+              onView={handleView}    // 👈 navega al detalle
             />
           </Col>
         ))}
       </Row>
-
-      {/* Modal de confirmación para eliminar */}
-      <Modal show={showDelete} onHide={() => setShowDelete(false)}>
-        <Modal.Header closeButton>
-          <Modal.Title>Confirmar eliminación</Modal.Title>
-        </Modal.Header>
-        <Modal.Body>¿Seguro que deseas eliminar esta minuta? Esta acción no se puede deshacer.</Modal.Body>
-        <Modal.Footer>
-          <Button variant="secondary" onClick={() => setShowDelete(false)}>Cancelar</Button>
-          <Button variant="danger" onClick={confirmDelete}>Eliminar</Button>
-        </Modal.Footer>
-      </Modal>
     </Container>
   )
 }
