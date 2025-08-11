@@ -37,7 +37,8 @@ export default function MinuteDetailPage() {
     <div className={styles.detailWrapper}>
       <button onClick={goBack}>Volver</button>
 
-      <h2>Minuta #{minute.id}</h2>
+      <h2>Minuta #{(minute.id ?? '').slice(0, 8)}</h2>
+
       <p><strong>Registrado por:</strong> {minute.created_by_name ?? minute.created_by_email ?? '—'}</p>
 
       {isOwner ? (

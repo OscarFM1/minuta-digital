@@ -26,6 +26,7 @@ export default function MinuteForm({
   enableAutosave,
   autosaveDelayMs = 800,
 }: MinuteFormProps) {
+  // Valores iniciales
   const init = useMemo<MinuteFormValues>(
     () =>
       initialValues ?? {
@@ -37,7 +38,9 @@ export default function MinuteForm({
     [initialValues]
   );
 
+  // Estado
   const [values, setValues] = useState<MinuteFormValues>(init);
+  const [lastSaved, setLastSaved] = useState<MinuteFormValues>(init); // para detectar cambios
   const [files, setFiles] = useState<File[]>([]);
   const [saving, setSaving] = useState(false);
   const [autoStatus, setAutoStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -46,32 +49,59 @@ export default function MinuteForm({
   const autosaveEnabled = enableAutosave ?? (mode === 'edit');
 
   useEffect(() => {
+    // Si SWR refresca initialValues, reseteamos el form y el lastSaved
     setValues(init);
+    setLastSaved(init);
   }, [init]);
 
-  const validate = (v: MinuteFormValues): string | null => {
+  // -------- Helpers de validación/cambio --------
+  const isSame = (a: MinuteFormValues, b: MinuteFormValues) =>
+    a.start_time === b.start_time &&
+    a.end_time === b.end_time &&
+    a.tarea_realizada === b.tarea_realizada &&
+    a.novedades === b.novedades;
+
+  // Reglas para AUTOGUARDAR (más permissive: no muestra error si faltan campos)
+  const canAutosave = (v: MinuteFormValues): boolean => {
+    if (!v.start_time || !v.end_time) return false;
+    if (!v.tarea_realizada.trim()) return false;
+    if (v.end_time < v.start_time) return false;
+    return true;
+  };
+
+  // Reglas para SUBMIT manual (estrictas)
+  const validateForSubmit = (v: MinuteFormValues): string | null => {
     if (!v.tarea_realizada.trim()) return 'La "tarea realizada" no puede estar vacía.';
-    if (v.start_time && v.end_time && v.end_time < v.start_time) {
-      return 'La hora fin no puede ser menor que la hora inicio.';
-    }
+    if (!v.start_time) return 'La hora inicio es obligatoria.';
+    if (!v.end_time) return 'La hora fin es obligatoria.';
+    if (v.end_time < v.start_time) return 'La hora fin no puede ser menor que la hora inicio.';
     if (mode === 'create' && requireAttachmentOnCreate && files.length === 0) {
       return 'Debes adjuntar al menos un archivo como evidencia.';
     }
     return null;
   };
 
+  // Cambios controlados
   const onChangeField = (key: keyof MinuteFormValues, value: string) => {
     setValues((prev) => ({ ...prev, [key]: value }));
   };
 
+  // --- AUTOGUARDADO (solo edit) ---
   const { debounced: debouncedAutosave } = useDebouncedCallback(async (snapshot: MinuteFormValues) => {
     if (!autosaveEnabled || mode !== 'edit' || !minuteId) return;
-    const err = validate(snapshot);
-    if (err) {
-      setErrorMsg(err);
-      setAutoStatus('error');
+
+    // Si no hay cambios vs. última versión guardada → no hagas nada
+    if (isSame(snapshot, lastSaved)) {
+      setAutoStatus('idle');
       return;
     }
+
+    // Si aún no cumple mínimos → no guardar ni mostrar error, solo idle
+    if (!canAutosave(snapshot)) {
+      setAutoStatus('idle');
+      return;
+    }
+
     try {
       setAutoStatus('saving');
       const updated = await updateMinute(minuteId, {
@@ -80,13 +110,14 @@ export default function MinuteForm({
         tarea_realizada: snapshot.tarea_realizada,
         novedades: snapshot.novedades,
       });
+      setLastSaved(snapshot); // marcamos este snapshot como la última versión guardada
       setAutoStatus('saved');
-      setErrorMsg(null);
       onSaved?.(updated);
       setTimeout(() => setAutoStatus('idle'), 1200);
     } catch (e: any) {
+      // Solo mostramos error si el servidor falla (RLS, red, etc.)
       setAutoStatus('error');
-      setErrorMsg(e.message ?? 'No fue posible autoguardar.');
+      // NO seteamos errorMsg aquí para no ensuciar el formulario mientras escribe
     }
   }, autosaveDelayMs);
 
@@ -96,8 +127,9 @@ export default function MinuteForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [values.start_time, values.end_time, values.tarea_realizada, values.novedades]);
 
+  // Submit manual (create o edit)
   const onSubmit = async () => {
-    const err = validate(values);
+    const err = validateForSubmit(values);
     if (err) {
       setErrorMsg(err);
       return;
@@ -108,15 +140,19 @@ export default function MinuteForm({
 
     try {
       if (mode === 'create') {
+        // 1) Crear la minuta
         const created = await createMinute(values);
+        // 2) Subir adjuntos (si hay)
         if (files.length > 0) {
           const paths: string[] = [];
           for (const f of files) {
             const path = await uploadAttachment(f, created.id);
             paths.push(path);
           }
+          // 3) Registrar adjuntos
           await createAttachmentRecords(created.id, paths);
         }
+        setLastSaved(values);
         onSaved?.(created);
       } else if (mode === 'edit' && minuteId) {
         const updated = await updateMinute(minuteId, {
@@ -125,6 +161,7 @@ export default function MinuteForm({
           tarea_realizada: values.tarea_realizada,
           novedades: values.novedades,
         });
+        setLastSaved(values);
         onSaved?.(updated);
       }
     } catch (e: any) {
