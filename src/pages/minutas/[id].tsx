@@ -2,29 +2,32 @@
  * /minutas/[id]
  * Detalle de una minuta (vista protegida)
  *
- * Reglas de acceso (UI Guard + RLS):
- *  - Debe existir sesión (Autenticado con Supabase Auth).
- *  - Admin (operaciones@multi...):
- *      → Solo lectura (no edición, no eliminación).
- *      → Debe poder ver TODAS las minutas (asegurar policy SELECT para admin).
- *  - Usuario normal:
- *      → Gracias a RLS, SOLO puede leer minutas donde minute.user_id = auth.uid().
- *      → Si intenta acceder a una que no es suya, el SELECT devolverá vacío.
- *      → Si es dueño: puede eliminar (y más adelante editar).
+ * Contiene:
+ *  - Navegación explícita al listado por rol (evita router.back()).
+ *  - Admin: solo lectura + muestra autor (created_by_*).
+ *  - Dueño: puede eliminar y EDITAR horas de inicio/fin.
+ *  - Adjuntos con <AttachmentsList minuteId={id} />.
  *
- * Notas:
- *  - Esta página NO inserta ni actualiza. Solo muestra y permite eliminar si es dueño.
- *  - Para mostrar adjuntos reutilizamos <AttachmentsList minuteId={id} />, que ya genera URLs.
- *  - Si quieres edición, podemos inyectar un <MinuteForm modo="editar" ...> más adelante.
- *
- * Accesibilidad y UX:
- *  - Loading y errores claros.
- *  - Bloqueos por rol con mensajes explícitos.
+ * Buenas prácticas:
+ *  - Estados claros de loading/error.
+ *  - Evitar depender del historial del navegador.
+ *  - Actualizaciones mínimas y RLS-friendly (solo dueño puede UPDATE/DELETE).
  */
 
 import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/router'
-import { Container, Row, Col, Card, Button, Spinner, Alert, Modal, Badge } from 'react-bootstrap'
+import {
+  Container,
+  Row,
+  Col,
+  Card,
+  Button,
+  Spinner,
+  Alert,
+  Modal,
+  Badge,
+  Form, // para inputs de hora en edición
+} from 'react-bootstrap'
 import { supabase } from '@/lib/supabaseClient'
 import AttachmentsList from '@/components/AttachmentsList'
 
@@ -41,6 +44,8 @@ type Minute = {
   description?: string
   notes?: string
   attachment?: { count: number }[]  // resultado de attachment(count)
+  created_by_name?: string | null   // NUEVO: autor visible para admin
+  created_by_email?: string | null  // NUEVO: autor visible para admin
 }
 
 export default function MinutaDetallePage() {
@@ -59,6 +64,12 @@ export default function MinutaDetallePage() {
 
   /** Modal eliminar */
   const [showDelete, setShowDelete] = useState(false)
+
+  /** Edición de horas (solo dueño) */
+  const [editingTimes, setEditingTimes] = useState(false)
+  const [startTimeEdit, setStartTimeEdit] = useState<string>('') // HH:mm
+  const [endTimeEdit, setEndTimeEdit] = useState<string>('')     // HH:mm
+  const [savingTimes, setSavingTimes] = useState(false)
 
   /** 1) Verificación de sesión (CSR) */
   useEffect(() => {
@@ -88,22 +99,37 @@ export default function MinutaDetallePage() {
       setLoading(true)
       setError(null)
       try {
-        // Traemos la minuta por id; seleccionamos user_id para saber el dueño
-        // y el count de attachments para UI.
+        // Selecciona campos clave + autor + count de adjuntos
         const { data, error } = await supabase
           .from('minute')
-          .select('id,user_id,date,start_time,end_time,description,notes,attachment(count)')
+          .select(`
+            id,
+            user_id,
+            date,
+            start_time,
+            end_time,
+            description,
+            notes,
+            created_by_name,
+            created_by_email,
+            attachment(count)
+          `)
           .eq('id', id)
           .maybeSingle()
 
         if (error) throw error
 
-        // Si no hay data: puede ser que no exista o RLS la oculte (no dueño)
         if (!data) {
+          // Puede ser que no exista o RLS la oculte (no dueño)
           setMinuta(null)
           setError('Minuta no encontrada o sin permisos para verla.')
         } else {
           setMinuta(data as Minute)
+          // Precargar horas (HH:mm) para edición
+          const toHM = (iso?: string) =>
+            iso ? new Date(iso).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: false }) : ''
+          setStartTimeEdit(toHM((data as any).start_time))
+          setEndTimeEdit(toHM((data as any).end_time))
         }
       } catch (err: any) {
         setError(err.message ?? 'Error al cargar la minuta.')
@@ -123,8 +149,8 @@ export default function MinutaDetallePage() {
     return minuta.user_id === currentUserId
   }, [minuta, currentUserId])
 
-  /** ✅ Helper de navegación consistente por rol (evita router.back()) */
-  const goToList = () => router.push(isAdmin ? '/minutas' : '/mis-minutas') // ✅ CAMBIO
+  /** Navegación consistente por rol (evita router.back()) */
+  const goToList = () => router.push(isAdmin ? '/minutas' : '/mis-minutas')
 
   /** 4) Eliminar (solo dueño) */
   const handleDelete = async () => {
@@ -134,15 +160,45 @@ export default function MinutaDetallePage() {
       const { error } = await supabase.from('minute').delete().eq('id', id)
       if (error) throw error
       setShowDelete(false)
-      // Redirige al listado correcto tras eliminar
-      goToList() // ✅ CAMBIO
+      goToList()
     } catch (err: any) {
       setError(err.message ?? 'No se pudo eliminar la minuta.')
       setShowDelete(false)
     }
   }
 
-  /** 5) Formatos bonitos para fecha/hora */
+  /** 5) Guardar edición de horas (solo dueño) */
+  const handleSaveTimes = async () => {
+    if (!minuta || !minuta.date) return
+    if (!startTimeEdit || !endTimeEdit) {
+      setError('Debes completar hora inicio y fin.')
+      return
+    }
+    setSavingTimes(true)
+    setError(null)
+    try {
+      // Combinar fecha (YYYY-MM-DD) + HH:mm (local) a string ISO simple
+      const startIso = `${minuta.date}T${startTimeEdit}`
+      const endIso   = `${minuta.date}T${endTimeEdit}`
+
+      const { error } = await supabase
+        .from('minute')
+        .update({ start_time: startIso, end_time: endIso })
+        .eq('id', minuta.id)
+
+      if (error) throw error
+
+      // Refrescar en UI sin recargar
+      setMinuta(prev => prev ? ({ ...prev, start_time: startIso, end_time: endIso }) : prev)
+      setEditingTimes(false)
+    } catch (e: any) {
+      setError(e.message ?? 'No se pudieron guardar las horas.')
+    } finally {
+      setSavingTimes(false)
+    }
+  }
+
+  /** 6) Helpers de formato */
   const fechaBonita = useMemo(() => {
     return minuta?.date
       ? new Date(minuta.date).toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -152,10 +208,8 @@ export default function MinutaDetallePage() {
   const hora = (iso?: string) =>
     iso ? new Date(iso).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' }) : '—'
 
-  /** 6) Render: estados */
-  if (checkingAuth) {
-    return <p className="mt-4">Verificando sesión…</p>
-  }
+  /** 7) Render: estados */
+  if (checkingAuth) return <p className="mt-4">Verificando sesión…</p>
 
   if (loading) {
     return (
@@ -169,7 +223,7 @@ export default function MinutaDetallePage() {
     return (
       <Container className="py-4">
         <Alert variant="warning">{error}</Alert>
-        <Button variant="secondary" onClick={goToList}>Volver</Button> {/* ✅ CAMBIO */}
+        <Button variant="secondary" onClick={goToList}>Volver</Button>
       </Container>
     )
   }
@@ -178,13 +232,18 @@ export default function MinutaDetallePage() {
     return (
       <Container className="py-4">
         <Alert variant="warning">Minuta no encontrada.</Alert>
-        <Button variant="secondary" onClick={goToList}>Volver</Button> {/* ✅ CAMBIO */}
+        <Button variant="secondary" onClick={goToList}>Volver</Button>
       </Container>
     )
   }
 
-  /** 7) UI principal (detalle) */
+  /** 8) UI principal (detalle) */
   const adjuntos = minuta.attachment?.[0]?.count ?? 0
+
+  // Etiqueta de autor visible solo para admin
+  const whoLabel = isAdmin
+    ? (minuta.created_by_name || minuta.created_by_email || '—')
+    : null
 
   return (
     <Container className="py-4">
@@ -193,19 +252,23 @@ export default function MinutaDetallePage() {
           <h1 className="mb-0">Detalle de Minuta</h1>
           <div className="text-muted">
             <small>
-              Fecha: <strong>{fechaBonita}</strong> · Hora: {hora(minuta.start_time)}–{hora(minuta.end_time)}
+              Fecha: <strong>{fechaBonita}</strong>
+              {' · '}Hora: {hora(minuta.start_time)}–{hora(minuta.end_time)}
+              {whoLabel && (
+                <>
+                  {' · '}Registró: <strong>{whoLabel}</strong>
+                </>
+              )}
             </small>
           </div>
         </Col>
         <Col xs="auto" className="d-flex gap-2">
-          {/* Admin: solo lectura -> NO mostrar eliminar/editar */}
-          {/* Dueño: puede eliminar (y luego podremos habilitar edición) */}
-          {!isAdmin && isOwner && (
+          {/* Dueño: puede editar horas y eliminar */}
+          {!isAdmin && isOwner && !editingTimes && (
             <>
-              {/* (Opcional) botón de edición futuro:
-              <Button size="sm" variant="outline-primary" onClick={() => router.push(`/minutas/editar/${minuta.id}`)}>
-                Editar
-              </Button> */}
+              <Button size="sm" variant="outline-primary" onClick={() => setEditingTimes(true)}>
+                Editar horas
+              </Button>
               <Button size="sm" variant="outline-danger" onClick={() => setShowDelete(true)}>
                 Eliminar
               </Button>
@@ -213,9 +276,61 @@ export default function MinutaDetallePage() {
           )}
           <Button size="sm" variant="secondary" onClick={goToList}>
             Volver
-          </Button> {/* ✅ CAMBIO */}
+          </Button>
         </Col>
       </Row>
+
+      {/* Edición inline de horas (solo dueño) */}
+      {!isAdmin && isOwner && editingTimes && (
+        <Card className="mb-3">
+          <Card.Header>Editar horas</Card.Header>
+          <Card.Body>
+            <Row className="g-3">
+              <Col md={3}>
+                <Form.Group controlId="startTimeEdit">
+                  <Form.Label>Hora inicio</Form.Label>
+                  <Form.Control
+                    type="time"
+                    value={startTimeEdit}
+                    onChange={(e) => setStartTimeEdit(e.target.value)}
+                    required
+                  />
+                </Form.Group>
+              </Col>
+              <Col md={3}>
+                <Form.Group controlId="endTimeEdit">
+                  <Form.Label>Hora fin</Form.Label>
+                  <Form.Control
+                    type="time"
+                    value={endTimeEdit}
+                    onChange={(e) => setEndTimeEdit(e.target.value)}
+                    required
+                  />
+                </Form.Group>
+              </Col>
+              <Col md="auto" className="d-flex align-items-end gap-2">
+                <Button
+                  variant="primary"
+                  onClick={handleSaveTimes}
+                  disabled={savingTimes}
+                >
+                  {savingTimes ? 'Guardando…' : 'Guardar'}
+                </Button>
+                <Button
+                  variant="outline-secondary"
+                  onClick={() => setEditingTimes(false)}
+                  disabled={savingTimes}
+                >
+                  Cancelar
+                </Button>
+              </Col>
+            </Row>
+            <small className="text-muted d-block mt-2">
+              Solo el propietario puede editar las horas (RLS).
+            </small>
+          </Card.Body>
+        </Card>
+      )}
 
       <Row>
         <Col md={8} className="mb-3">
@@ -240,7 +355,6 @@ export default function MinutaDetallePage() {
           <Card>
             <Card.Header>Adjuntos</Card.Header>
             <Card.Body>
-              {/* Lista real de evidencias usando componente existente */}
               <AttachmentsList minuteId={minuta.id} />
               {isAdmin && (
                 <small className="text-muted d-block mt-2">
