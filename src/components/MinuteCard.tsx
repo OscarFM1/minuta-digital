@@ -7,22 +7,25 @@
  *  - mode="owner":   Muestra "Editar" y "Eliminar" (ideal para el dueño, p.ej. /mis-minutas).
  *
  * Props:
- *  - minuta:  datos de la minuta (campos reales de la BD)
+ *  - minuta:  datos mínimos de la minuta (MinuteCardData)
  *  - mode?:   'read' | 'owner'  (default: 'owner')
- *  - onView?:   callback para ver detalles
- *  - onEdit?:   callback para editar (solo en owner)
- *  - onDelete?: callback para eliminar (solo en owner)
+ *  - onView?:   (minuta) => void
+ *  - onEdit?:   (minuta) => void
+ *  - onDelete?: (minuta) => void
  *
- * NOTA:
- *  - Esta tarjeta no accede a Supabase directamente; solo renderiza UI y emite callbacks.
- *  - El conteo de adjuntos puede venir pre-mapeado como `adjuntos` desde el fetch.
+ * Nota de tipos:
+ *  - Usamos un tipo “de presentación” (MinuteCardData) con `user_id?` opcional para
+ *    evitar conflictos cuando una página define un tipo más rico (con user_id obligatorio).
+ *  - Las páginas pueden castear de vuelta si necesitan `user_id` requerido.
  */
 
 import { Card, Button } from 'react-bootstrap'
 import styles from '@/styles/Minutas.module.css'
 
-type Minute = {
+/** Tipo mínimo que la card necesita para renderizar. */
+export type MinuteCardData = {
   id: string
+  user_id?: string               // opcional para no chocar con páginas que no lo tengan
   date?: string
   start_time?: string
   end_time?: string
@@ -32,11 +35,11 @@ type Minute = {
 }
 
 interface MinuteCardProps {
-  minuta: Minute
+  minuta: MinuteCardData
   mode?: 'read' | 'owner'
-  onView?: (minuta: Minute) => void
-  onEdit?: (minuta: Minute) => void
-  onDelete?: (minuta: Minute) => void
+  onView?: (minuta: MinuteCardData) => void
+  onEdit?: (minuta: MinuteCardData) => void
+  onDelete?: (minuta: MinuteCardData) => void
 }
 
 export default function MinuteCard({
@@ -46,7 +49,7 @@ export default function MinuteCard({
   onEdit,
   onDelete,
 }: MinuteCardProps) {
-  // Mapeos y formatos amigables
+  // Formatos amigables
   const titulo = minuta.description || 'Sin título'
   const fecha = minuta.date
     ? new Date(minuta.date).toLocaleDateString('es-CO', { day: '2-digit', month: '2-digit', year: 'numeric' })
@@ -71,7 +74,6 @@ export default function MinuteCard({
         <div className="d-flex justify-content-between align-items-center">
           <small>{adjuntos} adjunto{adjuntos === 1 ? '' : 's'}</small>
 
-          {/* Acciones según el modo */}
           {mode === 'read' ? (
             <div>
               <Button
