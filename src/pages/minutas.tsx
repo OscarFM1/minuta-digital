@@ -60,24 +60,23 @@ export default function MinutasPage() {
   const [checkingAuth, setCheckingAuth] = useState(true)
 
   useEffect(() => {
-  const checkUser = async () => {
-    const { data } = await supabase.auth.getUser()
-    const email = data?.user?.email
-    if (email !== 'operaciones@multi-impresos.com') {
-      router.replace('/mis-minutas')   // <-- antes lo mandabas a /login
-      return
+    const checkUser = async () => {
+      const { data } = await supabase.auth.getUser()
+      const email = data?.user?.email
+      if (email !== 'operaciones@multi-impresos.com') {
+        router.replace('/mis-minutas') // usuarios normales → su vista
+        return
+      }
+      setCheckingAuth(false) // admin confirmado
     }
-    setCheckingAuth(false)
-  }
-  checkUser()
-}, [router])
-
+    checkUser()
+  }, [router])
 
   if (checkingAuth) {
     return <p className="mt-4">Verificando permisos...</p>
   }
 
-  // Manejar eliminación
+  // Manejar eliminación (OJO: si quieres admin solo-lectura total, luego quitamos también eliminar/editar)
   function handleDelete(minuta: Minute) {
     setMinutaToDelete(minuta)
     setShowDelete(true)
@@ -95,9 +94,7 @@ export default function MinutasPage() {
     window.location.href = `/minutas/${minuta.id}`
   }
 
-  function handleNuevaMinuta() {
-    window.location.href = '/minutas/nueva'
-  }
+  // Nota: eliminamos handleNuevaMinuta porque el admin no puede crear
 
   async function logout() {
     await supabase.auth.signOut()
@@ -109,8 +106,8 @@ export default function MinutasPage() {
       <Row className="justify-content-between align-items-center mt-5 mb-3">
         <Col><h1 className={styles.title}>Minutas</h1></Col>
         <Col xs="auto">
-          <Button variant="primary" onClick={handleNuevaMinuta}>Nueva minuta</Button>
-          <Button variant="outline-secondary" className="ms-2" onClick={logout}>Cerrar sesión</Button>
+          {/* Admin SOLO lectura: sin botón de creación */}
+          <Button variant="outline-secondary" onClick={logout}>Cerrar sesión</Button>
         </Col>
       </Row>
 
