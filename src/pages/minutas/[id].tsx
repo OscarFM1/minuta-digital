@@ -123,6 +123,9 @@ export default function MinutaDetallePage() {
     return minuta.user_id === currentUserId
   }, [minuta, currentUserId])
 
+  /** ✅ Helper de navegación consistente por rol (evita router.back()) */
+  const goToList = () => router.push(isAdmin ? '/minutas' : '/mis-minutas') // ✅ CAMBIO
+
   /** 4) Eliminar (solo dueño) */
   const handleDelete = async () => {
     if (!id) return
@@ -131,8 +134,8 @@ export default function MinutaDetallePage() {
       const { error } = await supabase.from('minute').delete().eq('id', id)
       if (error) throw error
       setShowDelete(false)
-      // Redirige a una vista segura post-eliminación
-      router.replace('/mis-minutas')
+      // Redirige al listado correcto tras eliminar
+      goToList() // ✅ CAMBIO
     } catch (err: any) {
       setError(err.message ?? 'No se pudo eliminar la minuta.')
       setShowDelete(false)
@@ -166,7 +169,7 @@ export default function MinutaDetallePage() {
     return (
       <Container className="py-4">
         <Alert variant="warning">{error}</Alert>
-        <Button variant="secondary" onClick={() => router.back()}>Volver</Button>
+        <Button variant="secondary" onClick={goToList}>Volver</Button> {/* ✅ CAMBIO */}
       </Container>
     )
   }
@@ -175,7 +178,7 @@ export default function MinutaDetallePage() {
     return (
       <Container className="py-4">
         <Alert variant="warning">Minuta no encontrada.</Alert>
-        <Button variant="secondary" onClick={() => router.back()}>Volver</Button>
+        <Button variant="secondary" onClick={goToList}>Volver</Button> {/* ✅ CAMBIO */}
       </Container>
     )
   }
@@ -208,9 +211,9 @@ export default function MinutaDetallePage() {
               </Button>
             </>
           )}
-          <Button size="sm" variant="secondary" onClick={() => router.back()}>
+          <Button size="sm" variant="secondary" onClick={goToList}>
             Volver
-          </Button>
+          </Button> {/* ✅ CAMBIO */}
         </Col>
       </Row>
 
