@@ -5,7 +5,7 @@
  * - Modo de tarjeta: "edit" (muestra Editar/Eliminar).
  * - Botón "Nueva minuta" (CTA principal).
  * - Si es admin, se redirige a /minutas.
- * - **Nuevo**: mostrar el nombre del usuario en cada card (user_name).
+ * - Muestra el nombre del usuario en la card (user_name).
  */
 
 import React, { useEffect, useState } from 'react'
@@ -38,7 +38,6 @@ type MinuteRow = {
   description?: string
   notes?: string | null
   attachment?: { count: number }[]
-  // 👇 Campos agregados en paso 2 para mostrar autor en card
   created_by_name?: string | null
   created_by_email?: string | null
 }
@@ -76,7 +75,6 @@ const fetchMyMinutes = async (filters: Filters): Promise<MinuteCardData[]> => {
     description: m.description,
     notes: m.notes ?? undefined,
     adjuntos: m.attachment?.[0]?.count ?? 0,
-    // 👇 Mostramos el nombre en la card (fallback al email si no hay nombre)
     user_name: m.created_by_name || m.created_by_email || 'Sin nombre',
   }))
 }
@@ -122,9 +120,13 @@ export default function MisMinutasPage() {
   const [toDeleteId, setToDeleteId] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<string | null>(null)
 
-  /** Handlers principales (firmas que espera MinuteCard) */
-  const handleView = (id: string) => router.push(`/minutas/${id}`)
-  const handleEdit = (id: string) => router.push(`/minutas/${id}?edit=1`) // edición inline en el detalle
+  /** Handlers principales — devuelven void para coincidir con MinuteCard */
+  const handleView = (id: string) => {
+    void router.push(`/minutas/${id}`)
+  }
+  const handleEdit = (id: string) => {
+    void router.push(`/minutas/${id}?edit=1`) // edición inline en el detalle
+  }
   const askDelete = (id: string) => {
     setToDeleteId(id)
     setShowDelete(true)
@@ -201,11 +203,7 @@ export default function MisMinutasPage() {
           <Col key={minuta.id}>
             <MinuteCard
               minuta={minuta}
-              // 👇 Usamos "edit" para mostrar Editar/Eliminar
-              mode="edit"
-              // 👇 Pasamos isAdmin para que MinuteCard muestre user_name.
-              // (Si luego quieres mostrarlo siempre, quita la condición en MinuteCard y elimina esta prop)
-              isAdmin
+              mode="edit"        // muestra Editar/Eliminar
               onView={handleView}
               onEdit={handleEdit}
               onDelete={askDelete}

@@ -1,49 +1,41 @@
 /**
  * /minutas
  * Vista de ADMIN (operaciones@multi-impresos.com) en modo SOLO LECTURA.
- *
- * Comportamiento:
- *  - Lista TODAS las minutas (gracias a policy SELECT para admin).
- *  - No permite crear, editar ni eliminar desde esta vista.
- *  - Cada tarjeta solo muestra "Ver detalles", que navega a /minutas/[id].
- *
- * Seguridad:
- *  - UI guard: si no es admin → redirige a /mis-minutas.
- *  - RLS recomendado: policy SELECT para admin en minute/attachment.
+ * - Lista TODAS las minutas (policy SELECT para admin).
+ * - Cada tarjeta navega a /minutas/[id].
+ * - Muestra el autor en la card (user_name) usando created_by_*.
  */
 
 import React, { useState, useEffect } from 'react'
 import { useRouter } from 'next/router'
 import { Container, Row, Col, Button } from 'react-bootstrap'
-import MinuteCard from '@/components/MinuteCard'
+import MinuteCard, { MinuteCardData } from '@/components/MinuteCard'
 import MinutesFilter from '@/components/MinutesFilter'
 import useSWR from 'swr'
 import { supabase } from '@/lib/supabaseClient'
 import styles from '@/styles/Minutas.module.css'
 
-type Minute = {
-  id: string
-  date?: string
-  start_time?: string
-  end_time?: string
-  description?: string
-  notes?: string
-  adjuntos?: number
-}
-
-type Filters = {
-  desde?: string
-  hasta?: string
-}
+type Filters = { desde?: string; hasta?: string }
 
 const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
 
-const fetchMinutes = async (filters: Filters): Promise<Minute[]> => {
-  // Traemos columnas necesarias + count de attachments
+/** Trae todas las minutas con autor y conteo de adjuntos */
+const fetchMinutes = async (filters: Filters): Promise<MinuteCardData[]> => {
   let query = supabase
     .from('minute')
-    .select('id,date,start_time,end_time,description,notes,attachment(count)')
+    .select(`
+      id,
+      date,
+      start_time,
+      end_time,
+      description,
+      notes,
+      created_by_name,
+      created_by_email,
+      attachment(count)
+    `)
     .order('date', { ascending: false })
+    .order('id', { ascending: false })
 
   if (filters?.desde) query = query.gte('date', filters.desde)
   if (filters?.hasta) query = query.lte('date', filters.hasta)
@@ -52,18 +44,20 @@ const fetchMinutes = async (filters: Filters): Promise<Minute[]> => {
   if (error) throw error
 
   return (data ?? []).map((m: any) => ({
-    ...m,
+    id: m.id,
+    date: m.date,
+    start_time: m.start_time,
+    end_time: m.end_time,
+    description: m.description,
+    notes: m.notes ?? undefined,
     adjuntos: m?.attachment?.[0]?.count ?? 0,
+    user_name: m.created_by_name || m.created_by_email || 'Sin nombre',
   }))
 }
 
 export default function MinutasPage() {
   const router = useRouter()
   const [filters, setFilters] = useState<Filters>({})
-  const { data: minutas, error, isLoading } = useSWR<Minute[]>(
-    ['minutas', filters],
-    () => fetchMinutes(filters)
-  )
 
   // Guard: solo admin
   const [checkingAuth, setCheckingAuth] = useState(true)
@@ -80,11 +74,16 @@ export default function MinutasPage() {
     checkUser()
   }, [router])
 
+  const { data: minutas, error, isLoading } = useSWR<MinuteCardData[]>(
+    checkingAuth ? null : ['minutas', filters],
+    () => fetchMinutes(filters)
+  )
+
   if (checkingAuth) return <p className="mt-4">Verificando permisos…</p>
 
-  // ✅ Ahora recibe solo el id (string), no la minuta completa
+  // Navegar al detalle; devolvemos void (ignoramos Promise<boolean>)
   function handleView(id: string) {
-    router.push(`/minutas/${id}`)
+    void router.push(`/minutas/${id}`)
   }
 
   async function logout() {
@@ -97,7 +96,6 @@ export default function MinutasPage() {
       <Row className="justify-content-between align-items-center mt-5 mb-3">
         <Col><h1 className={styles.title}>Minutas</h1></Col>
         <Col xs="auto">
-          {/* Admin SOLO LECTURA: sin botón de creación */}
           <Button variant="outline-secondary" onClick={logout}>Cerrar sesión</Button>
         </Col>
       </Row>
@@ -111,13 +109,12 @@ export default function MinutasPage() {
       )}
 
       <Row xs={1} sm={2} md={3} lg={4} className="g-4">
-        {minutas?.map((minuta) => (
-          <Col key={minuta.id}>
+        {minutas?.map((m) => (
+          <Col key={m.id}>
             <MinuteCard
-              minuta={minuta}
-              isAdmin
-              mode="read"
-              onView={handleView}  // ✅ ahora el tipo coincide
+              minuta={m}
+              mode="read"         // solo lectura
+              onView={handleView} // (id: string) => void
             />
           </Col>
         ))}
