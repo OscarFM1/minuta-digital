@@ -1,250 +1,252 @@
 // src/components/MinuteForm.tsx
-
-import { useState, ChangeEvent, FormEvent } from 'react'
-import {
-  Container,
-  Form,
-  Button,
-  Row,
-  Col,
-  Alert,
-  Spinner
-} from 'react-bootstrap'
-import dayjs from 'dayjs'
-import { supabase } from '@/lib/supabaseClient'
-
-/** 
- * Estructura de los valores del formulario.
- */
-interface FormValues {
-  date: string
-  startTime: string
-  endTime: string
-  description: string
-  notes?: string
-  files: FileList | null
-}
+import { useEffect, useMemo, useState } from 'react';
+import { useDebouncedCallback } from '@/hooks/useDebouncedCallback';
+import { createAttachmentRecords, createMinute, updateMinute, uploadAttachment } from '@/lib/minutes';
+import type { Minute, MinuteFormValues, MinuteId } from '@/types/minute';
+import styles from '@/styles/Minutas.module.css';
 
 /**
- * Props para MinuteForm:
- * - modo: indica si el form es para crear o editar ('crear' | 'editar')
- * - minutoId: requerido solo si modo === 'editar'
- * - onSuccess: callback al finalizar (recibe el id de la minuta creada/actualizada)
+ * Props del MinuteForm reutilizable.
  */
 interface MinuteFormProps {
-  modo?: 'crear' | 'editar'
-  minutoId?: string
-  onSuccess?: (id: string) => void
+  mode: 'create' | 'edit';
+  // Para edición
+  minuteId?: MinuteId;
+  initialValues?: MinuteFormValues;
+
+  // Callbacks
+  onSaved?: (minute: Minute) => void; // invocado tras crear/editar exitosamente
+  onCancel?: () => void;
+
+  // Opciones
+  requireAttachmentOnCreate?: boolean; // default: true
+  enableAutosave?: boolean;            // default: true en edit
+  autosaveDelayMs?: number;            // default: 800
 }
 
 /**
- * MinuteForm
- * 
- * Formulario para:
- * - Registrar fecha y horas de trabajo.
- * - Describir la tarea y novedades.
- * - Subir evidencias (archivos).
- * 
- * Al enviar:
- * 1. Combina fecha+hora en timestamp ISO.
- * 2. Inserta (o actualiza) en la tabla `minute`.
- * 3. Sube archivos a Supabase Storage.
- * 4. Registra metadatos en la tabla `attachment`.
+ * Formulario de Minuta: crear o editar. Sin dependencias externas.
+ * - En create: sube adjuntos a Storage y crea registros en 'attachment'.
+ * - En edit: autoguarda con debounce los campos modificados.
  */
-const MinuteForm: React.FC<MinuteFormProps> = ({
-  modo = 'crear',
-  minutoId,
-  onSuccess
-}) => {
-  const [values, setValues] = useState<FormValues>({
-    date: dayjs().format('YYYY-MM-DD'),
-    startTime: dayjs().format('HH:mm'),
-    endTime: dayjs().format('HH:mm'),
-    description: '',
-    notes: '',
-    files: null,
-  })
-  const [error, setError]     = useState<string | null>(null)
-  const [success, setSuccess] = useState(false)
-  const [loading, setLoading] = useState(false)
+export default function MinuteForm({
+  mode,
+  minuteId,
+  initialValues,
+  onSaved,
+  onCancel,
+  requireAttachmentOnCreate = true,
+  enableAutosave,
+  autosaveDelayMs = 800,
+}: MinuteFormProps) {
+  // Valores iniciales
+  const init = useMemo<MinuteFormValues>(
+    () =>
+      initialValues ?? {
+        start_time: '',
+        end_time: '',
+        tarea_realizada: '',
+        novedades: '',
+      },
+    [initialValues]
+  );
 
-  /** Actualiza campos de texto, fecha y hora */
-  const handleChange = (e: ChangeEvent<HTMLInputElement|HTMLTextAreaElement>) => {
-    const { name, value } = e.target
-    setValues(prev => ({ ...prev, [name]: value }))
-  }
+  // Estado controlado
+  const [values, setValues] = useState<MinuteFormValues>(init);
+  const [files, setFiles] = useState<File[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [autoStatus, setAutoStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  /** Captura los archivos seleccionados */
-  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    setValues(prev => ({ ...prev, files: e.target.files }))
-  }
+  // Por defecto, el autoguardado está activo en edición, apagado en creación.
+  const autosaveEnabled = enableAutosave ?? (mode === 'edit');
 
-  /** Envía datos y archivos a Supabase */
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault()
-    setError(null)
-    setSuccess(false)
+  useEffect(() => {
+    // Si cambian initialValues externamente (SWR), resetea el form.
+    setValues(init);
+  }, [init]);
 
-    if (!values.files || values.files.length === 0) {
-      setError('Por favor sube al menos un archivo de evidencia.')
-      return
+  // Validaciones básicas
+  const validate = (v: MinuteFormValues): string | null => {
+    if (!v.tarea_realizada.trim()) return 'La "tarea realizada" no puede estar vacía.';
+    if (v.start_time && v.end_time && v.end_time < v.start_time) {
+      return 'La hora fin no puede ser menor que la hora inicio.';
     }
+    if (mode === 'create' && requireAttachmentOnCreate && files.length === 0) {
+      return 'Debes adjuntar al menos un archivo como evidencia.';
+    }
+    return null;
+  };
 
-    setLoading(true)
+  // Handler de cambio controlado
+  const onChangeField = (key: keyof MinuteFormValues, value: string) => {
+    setValues((prev) => ({ ...prev, [key]: value }));
+  };
+
+  // --- AUTOGUARDADO (solo edit) ---
+  const { debounced: debouncedAutosave } = useDebouncedCallback(async (snapshot: MinuteFormValues) => {
+    if (!autosaveEnabled || mode !== 'edit' || !minuteId) return;
+    const err = validate(snapshot);
+    if (err) {
+      setErrorMsg(err);
+      setAutoStatus('error');
+      return;
+    }
     try {
-      // 1) Combina fecha + hora en ISO timestamp
-      const startTimestamp = `${values.date}T${values.startTime}`
-      const endTimestamp   = `${values.date}T${values.endTime}`
-
-      let minuteId = minutoId
-
-      if (modo === 'crear') {
-        // 2a) Inserta la minuta
-        const { data: minute, error: minErr } = await supabase
-          .from('minute')
-          .insert({
-            date:       values.date,
-            start_time: startTimestamp,
-            end_time:   endTimestamp,
-            description: values.description,
-            notes:       values.notes || null,
-          })
-          .select('id')
-          .single()
-        if (minErr || !minute) throw minErr || new Error('No se creó la minuta')
-
-        minuteId = minute.id as string
-      }
-      // Para modo "editar", aquí podrías hacer UPDATE a la minuta si minutoId existe
-
-      // 3) Sube cada archivo y registra metadato
-      if (minuteId) {
-        await Promise.all(
-          Array.from(values.files).map(async file => {
-            const path = `${minuteId}/${file.name}`
-            const { error: uploadErr } = await supabase
-              .storage
-              .from('attachments')
-              .upload(path, file)
-            if (uploadErr) throw uploadErr
-
-            await supabase
-              .from('attachment')
-              .insert({
-                minute_id: minuteId,
-                url:        path,
-                filename:   file.name,
-              })
-          })
-        )
-      }
-
-      setSuccess(true)
-      setValues(prev => ({ ...prev, description: '', notes: '', files: null }))
-      if (onSuccess && minuteId) onSuccess(minuteId)
-    } catch (err: any) {
-      console.error(err)
-      setError(err.message || 'Error al guardar la minuta.')
-    } finally {
-      setLoading(false)
+      setAutoStatus('saving');
+      const updated = await updateMinute(minuteId, {
+        start_time: snapshot.start_time,
+        end_time: snapshot.end_time,
+        tarea_realizada: snapshot.tarea_realizada,
+        novedades: snapshot.novedades,
+      });
+      setAutoStatus('saved');
+      setErrorMsg(null);
+      onSaved?.(updated);
+      // Limpia estado de "saved" tras un rato visual (opcional)
+      setTimeout(() => setAutoStatus('idle'), 1200);
+    } catch (e: any) {
+      setAutoStatus('error');
+      setErrorMsg(e.message ?? 'No fue posible autoguardar.');
     }
-  }
+  }, autosaveDelayMs);
+
+  useEffect(() => {
+    if (mode !== 'edit' || !autosaveEnabled) return;
+    // Dispara autoguardado en cambios de campos
+    debouncedAutosave(values);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [values.start_time, values.end_time, values.tarea_realizada, values.novedades]);
+
+  // Submit manual (create o edit)
+  const onSubmit = async () => {
+    const err = validate(values);
+    if (err) {
+      setErrorMsg(err);
+      return;
+    }
+
+    setSaving(true);
+    setErrorMsg(null);
+
+    try {
+      if (mode === 'create') {
+        // 1) Crear la minuta
+        const created = await createMinute(values);
+        // 2) Subir adjuntos (si hay)
+        if (files.length > 0) {
+          const paths: string[] = [];
+          for (const f of files) {
+            const path = await uploadAttachment(f, created.id);
+            paths.push(path);
+          }
+          // 3) Crear registros en 'attachment'
+          await createAttachmentRecords(created.id, paths);
+        }
+        onSaved?.(created);
+      } else if (mode === 'edit' && minuteId) {
+        const updated = await updateMinute(minuteId, {
+          start_time: values.start_time,
+          end_time: values.end_time,
+          tarea_realizada: values.tarea_realizada,
+          novedades: values.novedades,
+        });
+        onSaved?.(updated);
+      }
+    } catch (e: any) {
+      setErrorMsg(e.message ?? 'No fue posible guardar.');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
-    <Container className="my-4">
-      <h3>{modo === 'crear' ? 'Registrar Minuta' : 'Editar Minuta'}</h3>
+    <form
+      className={styles.editForm}
+      onSubmit={(e) => {
+        e.preventDefault();
+        onSubmit();
+      }}
+    >
+      <div className={styles.formRow}>
+        <label>Hora inicio</label>
+        <input
+          type="time"
+          step={300}
+          value={values.start_time}
+          onChange={(e) => onChangeField('start_time', e.target.value)}
+          required
+        />
+      </div>
 
-      {error   && <Alert variant="danger">{error}</Alert>}
-      {success && <Alert variant="success">Minuta guardada correctamente.</Alert>}
+      <div className={styles.formRow}>
+        <label>Hora fin</label>
+        <input
+          type="time"
+          step={300}
+          value={values.end_time}
+          onChange={(e) => onChangeField('end_time', e.target.value)}
+          required
+        />
+      </div>
 
-      <Form onSubmit={handleSubmit}>
-        <Row>
-          <Col md={4}>
-            <Form.Group controlId="date">
-              <Form.Label>Fecha</Form.Label>
-              <Form.Control
-                type="date"
-                name="date"
-                value={values.date}
-                onChange={handleChange}
-                required
-              />
-            </Form.Group>
-          </Col>
-          <Col md={4}>
-            <Form.Group controlId="startTime">
-              <Form.Label>Hora inicio</Form.Label>
-              <Form.Control
-                type="time"
-                name="startTime"
-                value={values.startTime}
-                onChange={handleChange}
-                required
-              />
-            </Form.Group>
-          </Col>
-          <Col md={4}>
-            <Form.Group controlId="endTime">
-              <Form.Label>Hora fin</Form.Label>
-              <Form.Control
-                type="time"
-                name="endTime"
-                value={values.endTime}
-                onChange={handleChange}
-                required
-              />
-            </Form.Group>
-          </Col>
-        </Row>
+      <div className={styles.formCol}>
+        <label>Tarea realizada</label>
+        <textarea
+          rows={6}
+          placeholder="Describe la tarea realizada…"
+          value={values.tarea_realizada}
+          onChange={(e) => onChangeField('tarea_realizada', e.target.value)}
+          required
+        />
+      </div>
 
-        <Form.Group controlId="description" className="mt-3">
-          <Form.Label>Descripción de la tarea</Form.Label>
-          <Form.Control
-            as="textarea"
-            rows={3}
-            name="description"
-            value={values.description}
-            onChange={handleChange}
-            placeholder="Describe lo que hiciste..."
-            required
-          />
-        </Form.Group>
+      <div className={styles.formCol}>
+        <label>Novedades (opcional)</label>
+        <textarea
+          rows={4}
+          placeholder="Anota novedades, bloqueos o hallazgos…"
+          value={values.novedades}
+          onChange={(e) => onChangeField('novedades', e.target.value)}
+        />
+      </div>
 
-        <Form.Group controlId="notes" className="mt-3">
-          <Form.Label>Novedades (opcional)</Form.Label>
-          <Form.Control
-            as="textarea"
-            rows={2}
-            name="notes"
-            value={values.notes}
-            onChange={handleChange}
-            placeholder="Comentarios adicionales"
-          />
-        </Form.Group>
-
-        <Form.Group controlId="files" className="mt-3">
-          <Form.Label>Evidencias (archivos)</Form.Label>
-          <Form.Control
+      {mode === 'create' && (
+        <div className={styles.formCol}>
+          <label>Adjuntos {requireAttachmentOnCreate ? '(al menos 1)' : ''}</label>
+          <input
             type="file"
             multiple
-            onChange={handleFileChange}
-            required
+            onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
           />
-        </Form.Group>
+          {files.length > 0 && (
+            <div className={styles.hint}>
+              {files.length} archivo(s) seleccionado(s)
+            </div>
+          )}
+        </div>
+      )}
 
-        <Button
-          variant="primary"
-          type="submit"
-          className="mt-4"
-          disabled={loading}
-        >
-          {loading
-            ? (<><Spinner animation="border" size="sm" /> Guardando…</>)
-            : (modo === 'crear' ? 'Guardar Minuta' : 'Actualizar Minuta')}
-        </Button>
-      </Form>
-    </Container>
-  )
+      {errorMsg && <p className={styles.errorMsg}>{errorMsg}</p>}
+
+      <div className={styles.actions}>
+        {mode === 'edit' && autosaveEnabled && (
+          <span className={styles.autosaveBadge}>
+            {autoStatus === 'saving' && 'Guardando…'}
+            {autoStatus === 'saved' && 'Guardado ✓'}
+            {autoStatus === 'error' && 'Error al autoguardar'}
+            {autoStatus === 'idle' && ' '}
+          </span>
+        )}
+        {onCancel && (
+          <button type="button" onClick={onCancel} disabled={saving}>
+            Cancelar
+          </button>
+        )}
+        <button type="submit" disabled={saving}>
+          {saving ? 'Guardando…' : mode === 'create' ? 'Crear minuta' : 'Guardar'}
+        </button>
+      </div>
+    </form>
+  );
 }
-
-export default MinuteForm

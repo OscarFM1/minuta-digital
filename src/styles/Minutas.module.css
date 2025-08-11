@@ -1,23 +1,351 @@
+/* ===========================
+   Design Tokens (Light Mode)
+   =========================== */
+:root {
+  --font-sans: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, 'Apple Color Emoji','Segoe UI Emoji';
+  --color-bg: #f7fafc;
+  --color-surface: #ffffff;
+  --color-surface-2: #f9fbfd;
+  --color-border: #e6eef7;
+  --color-border-strong: #cfe0f2;
+
+  --color-text: #0f172a;            /* slate-900 */
+  --color-text-muted: #475569;      /* slate-600 */
+  --color-title: #024b9e;           /* tu primario */
+  --color-accent: #01aded;          /* tu acento */
+  --color-accent-600: #0299d4;
+  --color-accent-700: #0283b4;
+
+  --shadow-sm: 0 2px 10px rgba(2, 75, 158, 0.06);
+  --shadow-md: 0 8px 24px rgba(2, 75, 158, 0.10);
+  --shadow-lg: 0 18px 48px rgba(2, 75, 158, 0.12);
+
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --radius-xl: 22px;
+
+  --space-1: .25rem;
+  --space-2: .5rem;
+  --space-3: .75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+
+  --focus-ring: 0 0 0 3px rgba(1, 173, 237, .35);
+}
+
+/* ===========================
+   Dark Mode
+   =========================== */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #0b1220;
+    --color-surface: #0f172a;
+    --color-surface-2: #0b1426;
+    --color-border: #1e293b;
+    --color-border-strong: #2b3b52;
+
+    --color-text: #e6edf6;
+    --color-text-muted: #9fb0c9;
+    --color-title: #7cc4ff;
+    --color-accent: #37c6ff;
+    --color-accent-600: #2bb6ee;
+    --color-accent-700: #1f9ad0;
+
+    --shadow-sm: 0 2px 10px rgba(0,0,0,.35);
+    --shadow-md: 0 8px 24px rgba(0,0,0,.45);
+    --shadow-lg: 0 18px 48px rgba(0,0,0,.55);
+  }
+
+  .card:hover, .card:focus {
+    outline-color: rgba(55, 198, 255, .6);
+  }
+}
+
+/* ===========================
+   Base + Layout
+   =========================== */
 .bg {
-  background: #f7fafc;
+  background: radial-gradient(1200px 800px at 20% -10%, rgba(1,173,237,.08), transparent),
+              radial-gradient(900px 600px at 120% 20%, rgba(2,75,158,.06), transparent),
+              var(--color-bg);
   min-height: 100vh;
-  padding-bottom: 3rem;
+  padding-bottom: var(--space-10);
+  font-family: var(--font-sans);
+  color: var(--color-text);
 }
+
+.detailWrapper {
+  max-width: 980px;
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-4);
+  display: grid;
+  gap: var(--space-6);
+}
+
+/* ===========================
+   Tipografía
+   =========================== */
 .title {
-  color: #024b9e;
-  font-family: 'Inter', sans-serif;
-  font-weight: 700;
-  letter-spacing: -1px;
+  color: var(--color-title);
+  font-family: var(--font-sans);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  font-size: clamp(1.6rem, 1.1rem + 1.6vw, 2.25rem);
+  margin: 0 0 var(--space-4);
 }
+
+h2, h3 {
+  margin: var(--space-4) 0 var(--space-2);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+h2 { font-size: clamp(1.25rem, 1rem + 1vw, 1.75rem); }
+h3 { font-size: clamp(1.05rem, .9rem + .6vw, 1.25rem); }
+
+p, label, input, textarea, button, span, small {
+  font-family: var(--font-sans);
+}
+
+/* ===========================
+   Tarjetas
+   =========================== */
 .card {
-  border-radius: 16px;
-  box-shadow: 0 4px 20px rgba(1, 173, 237, 0.04);
-  transition: box-shadow 0.2s, border 0.2s;
-  border: 1.5px solid #e6eef7;
-  background: #fff;
+  border-radius: var(--radius-lg);
+  border: 1.5px solid var(--color-border);
+  background: linear-gradient(180deg, var(--color-surface) 0%, var(--color-surface-2) 100%);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow .2s ease, border-color .2s ease, transform .12s ease, outline-color .2s ease;
+  outline: 2px solid transparent;
 }
 .card:hover, .card:focus {
-  box-shadow: 0 8px 32px rgba(2, 75, 158, 0.10);
-  border: 1.5px solid #01aded;
-  outline: 2px solid #01aded;
+  box-shadow: var(--shadow-md);
+  border-color: var(--color-accent);
+  outline: 2px solid rgba(1, 173, 237, .25);
+  transform: translateY(-1px);
+}
+
+/* ===========================
+   Bloques de lectura
+   =========================== */
+.readRow {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+.readBlock { display: grid; gap: .25rem; }
+.readBox {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  white-space: pre-wrap;
+  color: var(--color-text);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.4);
+}
+
+/* ===========================
+   Formularios (MinuteForm)
+   =========================== */
+.editForm { display: grid; gap: var(--space-5); }
+
+.formRow, .formCol {
+  display: grid;
+  gap: .4rem;
+}
+
+label {
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+input[type="time"],
+input[type="text"],
+textarea {
+  background: var(--color-surface);
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: .7rem .85rem;
+  font-size: .975rem;
+  color: var(--color-text);
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+  box-shadow: 0 1px 0 rgba(2,75,158,.04);
+}
+
+input[type="time"]:hover,
+input[type="text"]:hover,
+textarea:hover {
+  border-color: var(--color-border-strong);
+}
+
+input[type="time"]:focus,
+input[type="text"]:focus,
+textarea:focus {
+  border-color: var(--color-accent);
+  box-shadow: var(--focus-ring);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 130px;
+}
+
+.hint {
+  font-size: .9rem;
+  color: var(--color-text-muted);
+}
+
+/* ===========================
+   Acciones / Botones
+   =========================== */
+.actions {
+  display: flex;
+  gap: var(--space-3);
+  justify-content: flex-end;
+  align-items: center;
+}
+
+button {
+  --btn-bg: var(--color-accent);
+  --btn-bg-hover: var(--color-accent-600);
+  --btn-bg-active: var(--color-accent-700);
+  --btn-text: #ffffff;
+
+  border: 0;
+  background: var(--btn-bg);
+  color: var(--btn-text);
+  font-weight: 700;
+  letter-spacing: .01em;
+  padding: .7rem 1rem;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  box-shadow: 0 6px 16px rgba(1, 173, 237, .25);
+  transition: transform .08s ease, box-shadow .15s ease, background .15s ease;
+}
+
+button:hover { background: var(--btn-bg-hover); box-shadow: 0 8px 22px rgba(1, 173, 237, .3); }
+button:active { background: var(--btn-bg-active); transform: translateY(1px); }
+button:focus-visible { box-shadow: var(--focus-ring); }
+
+button[disabled] {
+  opacity: .6;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+button.secondary {
+  --btn-bg: #e7f6fd;
+  --btn-bg-hover: #d8f0fb;
+  --btn-bg-active: #cdebf8;
+  --btn-text: var(--color-text);
+  border: 1.5px solid var(--color-border);
+  box-shadow: none;
+}
+
+/* Badge de autoguardado */
+.autosaveBadge {
+  font-size: .9rem;
+  padding: .2rem .6rem;
+  border-radius: 999px;
+  background: #eef7ff;
+  border: 1px solid #cfe6fb;
+  color: #0b5cab;
+  min-width: 110px;
+  text-align: center;
+}
+@media (prefers-color-scheme: dark) {
+  .autosaveBadge {
+    background: rgba(55, 198, 255, .08);
+    border-color: rgba(55, 198, 255, .25);
+    color: #a9dbff;
+  }
+}
+
+.errorMsg {
+  color: #b00020;
+  font-weight: 700;
+}
+
+/* ===========================
+   Filtros / Grids de listado
+   =========================== */
+.filtersBar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Tarjetas de Minutas */
+.cardsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--space-4);
+}
+
+.minuteCard {
+  composes: card;
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-3);
+}
+
+.minuteMeta {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  color: var(--color-text-muted);
+  font-size: .92rem;
+}
+
+.metaDot::before {
+  content: "•";
+  margin: 0 .4rem;
+  color: var(--color-border-strong);
+}
+
+/* ===========================
+   Attachments (lista simple)
+   =========================== */
+.attachments {
+  display: grid;
+  gap: .5rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+}
+.attachmentItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: .55rem .75rem;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--color-border);
+}
+.attachmentItem:hover {
+  border-color: var(--color-accent);
+  background: linear-gradient(0deg, rgba(1,173,237,.05), rgba(1,173,237,.05));
+}
+
+/* ===========================
+   Accesibilidad / Motion
+   =========================== */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
 }
