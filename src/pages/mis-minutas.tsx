@@ -1,17 +1,24 @@
 /**
  * /mis-minutas
  * Listado de minutas del USUARIO ACTUAL (propietario).
- * - RLS limita a las minutas del usuario, no hace falta filtrar por user_id en el cliente.
+ * - RLS ya restringe a las minutas del usuario.
  * - Modo de tarjeta: "edit" (muestra Editar/Eliminar).
- * - onView / onEdit navegan al detalle; eliminación con confirmación.
- * - Si es admin, se redirige a /minutas (all-read).
+ * - Botón "Nueva minuta" (CTA principal).
+ * - Si es admin, se redirige a /minutas.
  */
 
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 import { useRouter } from 'next/router'
-import { Container, Row, Col, Button, Modal, Alert, Spinner } from 'react-bootstrap'
+import {
+  Container,
+  Row,
+  Col,
+  Button,
+  Modal,
+  Alert,
+  Spinner,
+} from 'react-bootstrap'
 import useSWR from 'swr'
-import dayjs from 'dayjs'
 import { supabase } from '@/lib/supabaseClient'
 import MinuteCard, { MinuteCardData } from '@/components/MinuteCard'
 import MinutesFilter from '@/components/MinutesFilter'
@@ -19,10 +26,7 @@ import styles from '@/styles/Minutas.module.css'
 
 const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
 
-type Filters = {
-  desde?: string
-  hasta?: string
-}
+type Filters = { desde?: string; hasta?: string }
 
 type MinuteRow = {
   id: string
@@ -57,20 +61,15 @@ const fetchMyMinutes = async (filters: Filters): Promise<MinuteCardData[]> => {
     description: m.description,
     notes: m.notes ?? undefined,
     adjuntos: m.attachment?.[0]?.count ?? 0,
-    // útil si más adelante validas ownership en el cliente
-    // (aunque en esta vista todas son del usuario por RLS)
-    user_id: m.user_id as any, // (no la usa MinuteCard, pero dejamos el dato disponible)
+    // (opcional) user_name no aplica aquí; MinuteCard lo maneja opcional
   }))
 }
 
 export default function MisMinutasPage() {
   const router = useRouter()
 
-  /** Guard de sesión + admin redirect */
+  /** Guard de sesión + redirect admin */
   const [checkingAuth, setCheckingAuth] = useState(true)
-  const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null)
-  const [currentUserId, setCurrentUserId] = useState<string | null>(null)
-
   useEffect(() => {
     let active = true
     const check = async () => {
@@ -79,18 +78,17 @@ export default function MisMinutasPage() {
         router.replace('/login')
         return
       }
-      if (!active) return
       const email = data.user.email ?? null
-      setCurrentUserEmail(email)
-      setCurrentUserId(data.user.id ?? null)
       if (email === ADMIN_EMAIL) {
-        router.replace('/minutas') // admin → vista de todas
+        router.replace('/minutas') // admin → vista global
         return
       }
-      setCheckingAuth(false)
+      if (active) setCheckingAuth(false)
     }
     check()
-    return () => { active = false }
+    return () => {
+      active = false
+    }
   }, [router])
 
   /** Filtros por fecha */
@@ -108,10 +106,13 @@ export default function MisMinutasPage() {
   const [toDeleteId, setToDeleteId] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<string | null>(null)
 
-  /** Handlers */
+  /** Handlers principales (firmas que espera MinuteCard) */
   const handleView = (id: string) => router.push(`/minutas/${id}`)
   const handleEdit = (id: string) => router.push(`/minutas/${id}?edit=1`) // edición inline en el detalle
-  const askDelete = (id: string) => { setToDeleteId(id); setShowDelete(true) }
+  const askDelete = (id: string) => {
+    setToDeleteId(id)
+    setShowDelete(true)
+  }
 
   const confirmDelete = async () => {
     if (!toDeleteId) return
@@ -140,24 +141,43 @@ export default function MisMinutasPage() {
 
   return (
     <Container fluid className={styles.bg}>
+      {/* Header con CTA "Nueva minuta" */}
       <Row className="justify-content-between align-items-center mt-5 mb-3">
-        <Col><h1 className={styles.title}>Mis minutas</h1></Col>
-        <Col xs="auto">
-          <Button variant="outline-secondary" onClick={logout}>Cerrar sesión</Button>
+        <Col>
+          <h1 className={styles.title}>Mis minutas</h1>
+        </Col>
+        <Col xs="auto" className="d-flex gap-2">
+          <Button variant="primary" onClick={() => router.push('/minutas/nueva')}>
+            Nueva minuta
+          </Button>
+          <Button variant="outline-secondary" onClick={logout}>
+            Cerrar sesión
+          </Button>
         </Col>
       </Row>
 
       <MinutesFilter onChange={setFilters} />
 
       {feedback && (
-        <Alert variant="info" className="mt-3" onClose={() => setFeedback(null)} dismissible>
+        <Alert
+          variant="info"
+          className="mt-3"
+          onClose={() => setFeedback(null)}
+          dismissible
+        >
           {feedback}
         </Alert>
       )}
-      {error && <Alert variant="danger" className="mt-3">Error al cargar minutas: {error.message}</Alert>}
+      {error && (
+        <Alert variant="danger" className="mt-3">
+          Error al cargar minutas: {error.message}
+        </Alert>
+      )}
       {isLoading && <p className="mt-3">Cargando…</p>}
       {!isLoading && !error && (items?.length ?? 0) === 0 && (
-        <p className="mt-3">No tienes minutas registradas entre las fechas seleccionadas.</p>
+        <p className="mt-3">
+          No tienes minutas registradas entre las fechas seleccionadas.
+        </p>
       )}
 
       <Row xs={1} sm={2} md={3} lg={4} className="g-4">
@@ -165,14 +185,24 @@ export default function MisMinutasPage() {
           <Col key={minuta.id}>
             <MinuteCard
               minuta={minuta}
-              mode="edit"                 // 👈 muestra Editar/Eliminar
-              onView={handleView}        // (id: string) => void
-              onEdit={handleEdit}        // (id: string) => void
-              onDelete={askDelete}       // (id: string) => void
+              mode="edit"        // muestra Editar/Eliminar
+              onView={handleView}
+              onEdit={handleEdit}
+              onDelete={askDelete}
             />
           </Col>
         ))}
       </Row>
+
+      {/* FAB móvil opcional */}
+      <div className="d-sm-none">
+        <Button
+          onClick={() => router.push('/minutas/nueva')}
+          style={{ position: 'fixed', right: 16, bottom: 16, borderRadius: 9999 }}
+        >
+          + Nueva
+        </Button>
+      </div>
 
       {/* Modal Eliminar */}
       <Modal show={showDelete} onHide={() => setShowDelete(false)}>
@@ -187,7 +217,13 @@ export default function MisMinutasPage() {
             Cancelar
           </Button>
           <Button variant="danger" onClick={confirmDelete} disabled={deleting}>
-            {deleting ? (<><Spinner size="sm" animation="border" /> Eliminando…</>) : 'Eliminar'}
+            {deleting ? (
+              <>
+                <Spinner size="sm" animation="border" /> Eliminando…
+              </>
+            ) : (
+              'Eliminar'
+            )}
           </Button>
         </Modal.Footer>
       </Modal>
