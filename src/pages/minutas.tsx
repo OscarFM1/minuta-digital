@@ -82,9 +82,9 @@ export default function MinutasPage() {
 
   if (checkingAuth) return <p className="mt-4">Verificando permisos…</p>
 
-  // Navegar al detalle en modo lectura
-  function handleView(minuta: Minute) {
-    router.push(`/minutas/${minuta.id}`)
+  // ✅ Ahora recibe solo el id (string), no la minuta completa
+  function handleView(id: string) {
+    router.push(`/minutas/${id}`)
   }
 
   async function logout() {
@@ -115,8 +115,9 @@ export default function MinutasPage() {
           <Col key={minuta.id}>
             <MinuteCard
               minuta={minuta}
-              mode="read"            // 👈 SOLO lectura (muestra “Ver detalles”)
-              onView={handleView}    // 👈 navega al detalle
+              isAdmin
+              mode="read"
+              onView={handleView}  // ✅ ahora el tipo coincide
             />
           </Col>
         ))}
