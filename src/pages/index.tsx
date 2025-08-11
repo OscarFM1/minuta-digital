@@ -1,14 +1,13 @@
-import type { NextPage } from 'next'
-import Head from 'next/head'
-import  MinuteForm  from '@/components/MinuteForm'
+// src/pages/index.tsx
+import { useEffect } from 'react'
+import { useRouter } from 'next/router'
 
-const Home: NextPage = () => (
-  <>
-    <Head>
-      <title>Minuta Digital</title>
-    </Head>
-    <MinuteForm />
-  </>
-)
+export default function Home() {
+  const router = useRouter()
 
-export default Home
+  useEffect(() => {
+    router.replace('/login') // Redirige automáticamente al login
+  }, [router])
+
+  return null // No renderiza nada mientras redirige
+}
