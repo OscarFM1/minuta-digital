@@ -9,10 +9,9 @@
  *      "edit"      → Ver, Editar, Eliminar
  *      "view-only" → sin acciones, solo info
  *
- * Notas de implementación:
- * - Usamos dayjs (sin dependencias nuevas).
- * - Formateo robusto: si `start_time` o `end_time` vienen como "HH:mm" o como ISO,
- *   igual los mostramos bien.
+ * Notas:
+ * - Formateo robusto de TIME: acepta "HH:mm", "HH:mm:ss" o ISO con hora.
+ * - Mostramos hora en 24h: "HH:mm". Si falta alguna → "— — —".
  */
 
 import React from 'react'
@@ -22,13 +21,14 @@ import dayjs from 'dayjs'
 /** Estructura de datos que recibe la card */
 export type MinuteCardData = {
   id: string
-  date?: string            // Ej. "2025-08-09"
-  start_time?: string      // Puede ser "HH:mm" o "YYYY-MM-DDTHH:mm"
-  end_time?: string        // Puede ser "HH:mm" o "YYYY-MM-DDTHH:mm"
-  description?: string
-  notes?: string
+  date?: string              // Ej. "2025-08-09"
+  start_time?: string | null // "HH:mm" | "HH:mm:ss" | ISO
+  end_time?: string | null   // "HH:mm" | "HH:mm:ss" | ISO
+  description?: string | null
+  notes?: string | null
   adjuntos?: number
-  user_name?: string       // Nombre de quien registró la minuta
+  user_name?: string
+  folio?: string | null
 }
 
 /** Props del componente */
@@ -40,22 +40,28 @@ type Props = {
   onDelete?: (id: string) => void
 }
 
-/** Helper: formatea "HH:mm" o ISO → "hh:mm a" (10:30 a. m.) */
-function fmtTime(value?: string): string {
-  if (!value) return '—'
+/** "HH:mm" o "HH:mm:ss" o ISO → "HH:mm" */
+function toHHMM(value?: string | null): string | null {
+  if (!value) return null
+  const s = value.trim()
 
-  // Si viene solo "HH:mm", lo parseamos como hoy a esa hora
-  if (value.length <= 5) {
-    const parsed = dayjs(`2000-01-01T${value}`)
-    return parsed.isValid() ? parsed.format('hh:mm a') : '—'
-  }
+  // TIME puro
+  const m = /^(\d{2}):(\d{2})(?::\d{2})?$/.exec(s)
+  if (m) return `${m[1]}:${m[2]}`
 
-  // Si viene ISO (o fecha+hora), lo formateamos directo
-  const d = dayjs(value)
-  return d.isValid() ? d.format('hh:mm a') : '—'
+  // Intento ISO/fecha+hora
+  const d = dayjs(s)
+  return d.isValid() ? d.format('HH:mm') : null
 }
 
-/** Helper: formatea "YYYY-MM-DD" → "DD/MM/YYYY" */
+/** Rango de horas presentable */
+function timeRange(start?: string | null, end?: string | null): string {
+  const s = toHHMM(start)
+  const e = toHHMM(end)
+  return s && e ? `${s} — ${e}` : '— — —'
+}
+
+/** "YYYY-MM-DD" → "DD/MM/YYYY" (si no es válida: "Sin fecha") */
 function fmtDate(value?: string): string {
   if (!value) return 'Sin fecha'
   const d = dayjs(value)
@@ -70,19 +76,22 @@ export default function MinuteCard({
   onDelete,
 }: Props) {
   const fechaStr = fmtDate(minuta.date)
-  const horaIni  = fmtTime(minuta.start_time)
-  const horaFin  = fmtTime(minuta.end_time)
+  const rango = timeRange(minuta.start_time, minuta.end_time)
   const countAdj = typeof minuta.adjuntos === 'number' ? minuta.adjuntos : 0
+  const desc = (minuta.description ?? '').trim() || 'Sin descripción'
 
   return (
     <Card className="h-100 shadow-sm">
       <Card.Body>
-        {/* Fecha y horas */}
+        {/* Fecha + horas (y opcional folio si existe) */}
         <Card.Title className="mb-1">
-          <strong>{fechaStr}</strong> · {horaIni} – {horaFin}
+          <strong>{fechaStr}</strong>
+          {' · '}
+          {rango}
+          {minuta.folio ? ` · #${minuta.folio}` : null}
         </Card.Title>
 
-        {/* Nombre de quien registró (si existe) */}
+        {/* Registrado por */}
         {minuta.user_name && (
           <p className="text-muted mb-2" style={{ fontSize: '0.9rem' }}>
             Registrado por: <strong>{minuta.user_name}</strong>
@@ -90,9 +99,7 @@ export default function MinuteCard({
         )}
 
         {/* Descripción */}
-        <Card.Text className="mb-2">
-          {minuta.description || 'Sin descripción'}
-        </Card.Text>
+        <Card.Text className="mb-2">{desc}</Card.Text>
 
         {/* Adjuntos */}
         <Badge bg="light" text="dark">
@@ -100,7 +107,7 @@ export default function MinuteCard({
         </Badge>
       </Card.Body>
 
-      {/* Acciones según modo */}
+      {/* Acciones */}
       <Card.Footer className="bg-white border-top-0 d-flex flex-wrap gap-2">
         {mode !== 'view-only' && onView && (
           <Button variant="primary" size="sm" onClick={() => onView(minuta.id)}>
