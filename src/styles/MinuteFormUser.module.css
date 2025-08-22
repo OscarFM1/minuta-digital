@@ -1,0 +1,50 @@
+/* src/styles/MinuteFormUser.module.css
+   - Aumenta contraste en labels/placeholders en tema oscuro.
+   - Mejora borde/hover/focus de textareas.
+   - Estilo visual para el campo bloqueado (tarea realizada).
+*/
+
+/* === Scope local para no tocar otros formularios === */
+.userFormScope :global(label),
+.userFormScope :global(.form-label),
+.userFormScope :global(legend),
+.userFormScope :global(label.text-muted),
+.userFormScope :global(.form-label.text-muted) {
+  color: #e5e7eb !important;   /* Slate-200, alto contraste */
+  opacity: 1 !important;       /* evita atenuación de 'text-muted' */
+  font-weight: 600;
+}
+
+/* Área de texto */
+.userFormScope :global(textarea.form-control) {
+  background: #0b1324;         /* tu fondo oscuro actual */
+  color: #e5e7eb;              /* alto contraste */
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 12px;
+}
+
+.userFormScope :global(textarea.form-control::placeholder) {
+  color: #a1a1aa;              /* mejor visibilidad de placeholder */
+  opacity: 1;
+}
+
+/* Enfasis al focus sin color estridente */
+.userFormScope :global(textarea.form-control:focus) {
+  box-shadow: 0 0 0 0.2rem rgba(0,154,218,0.25); /* #009ada */
+  border-color: #009ada;
+  outline: none;
+}
+
+/* Campo "Tarea realizada" bloqueado (clase aplicada por LockTareaRealizada) */
+.userFormScope :global(.is-readonly-tarea) {
+  pointer-events: none;
+  opacity: .95;
+  border-style: dashed;
+  border-color: rgba(255,255,255,0.2);
+}
+
+/* Tooltip/ayudas dentro del scope */
+.userFormScope :global(.form-text),
+.userFormScope :global(.text-muted) {
+  color: #cbd5e1 !important;   /* Slate-300 */
+}

@@ -1,5 +1,5 @@
 // src/pages/login.tsx
-import { useState, ChangeEvent, FormEvent, useEffect } from 'react'
+import { useState, useEffect, useRef, ChangeEvent, FormEvent } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
 import Image from 'next/image'
@@ -8,71 +8,106 @@ import { supabase } from '@/lib/supabaseClient'
 import styles from '@/styles/Login.module.css'
 
 const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
+const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
+
+// Normaliza posibles valores en metadata
+const isFirstLogin = (v: any) => v === true || v === 'true' || v === 1 || v === '1'
 
 export default function LoginPage() {
   const router = useRouter()
-  const [email, setEmail]       = useState('')
+  const [userOrEmail, setUserOrEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [error, setError]       = useState<string | null>(null)
-  const [info, setInfo]         = useState<string | null>(null)
-  const [loading, setLoading]   = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [info, setInfo] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const redirecting = useRef(false) // previene que el loading quede colgado
 
-  // Si viene de una ruta protegida sin permisos, mostramos aviso
+  // Destino por defecto
+  const computeGo = () =>
+    typeof router.query.go === 'string' ? router.query.go : '/mis-minutas'
+
+  // Redirección robusta (navegación dura)
+  const hardRedirect = (url: string) => {
+    redirecting.current = true
+    window.location.replace(url)
+  }
+
+  // 1) Mensaje informativo si viene de ruta protegida
   useEffect(() => {
     if (router.query.unauthorized) {
       setInfo('No tienes permisos para esa sección. Inicia sesión con una cuenta autorizada.')
     }
   }, [router.query.unauthorized])
 
-  // Si ya hay sesión, redirige según email (evita loops)
+  // 2) Si ya hay sesión al montar la página, redirige
   useEffect(() => {
-    const checkSession = async () => {
+    let alive = true
+    ;(async () => {
       const { data } = await supabase.auth.getUser()
-      const userEmail = data?.user?.email
-      if (!userEmail) return
-      if (userEmail === ADMIN_EMAIL) {
-        router.replace('/minutas')
-      } else {
-        router.replace('/mis-minutas')
-      }
-    }
-    checkSession()
+      if (!alive) return
+      const user = data?.user
+      if (!user) return
+
+      const go = computeGo()
+      const meta = user.user_metadata
+      if (isFirstLogin(meta?.first_login)) hardRedirect(`/cambiar-password?go=${encodeURIComponent(go)}`)
+      else if (user.email === ADMIN_EMAIL) hardRedirect('/minutas')
+      else hardRedirect(go)
+    })()
+    return () => { alive = false }
   }, [router])
 
+  // 3) Suscripción: cuando Supabase diga SIGNED_IN → redirige
+  useEffect(() => {
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (_event === 'SIGNED_IN' && session?.user && !redirecting.current) {
+        const go = computeGo()
+        const user = session.user
+        const meta = user.user_metadata
+        if (isFirstLogin(meta?.first_login)) hardRedirect(`/cambiar-password?go=${encodeURIComponent(go)}`)
+        else if (user.email === ADMIN_EMAIL) hardRedirect('/minutas')
+        else hardRedirect(go)
+      }
+      if (_event === 'SIGNED_OUT' && !redirecting.current) {
+        hardRedirect('/login')
+      }
+    })
+    return () => { sub.subscription.unsubscribe() }
+  }, []) // una sola vez
+
+  // 4) Submit de login: solo disparamos signIn; la redirección la hace el listener
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError(null)
     setInfo(null)
     setLoading(true)
+
     try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+      const email = userOrEmail.includes('@')
+        ? userOrEmail.trim()
+        : `${userOrEmail.trim()}@${LOGIN_DOMAIN}`
+
+      const { error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) throw error
 
-      const userEmail = data.user?.email
-      if (userEmail === ADMIN_EMAIL) {
-        router.push('/minutas')
-      } else {
-        router.push('/mis-minutas')
-      }
+      // Fallback: si en 3s no redirigió (por cualquier motivo), liberamos loading
+      setTimeout(() => {
+        if (!redirecting.current) setLoading(false)
+      }, 3000)
     } catch (err: any) {
       setError(err?.message ?? 'No se pudo iniciar sesión')
-    } finally {
       setLoading(false)
     }
   }
 
   return (
     <>
-      <Head>
-        <title>Iniciar Sesión – Minuta Digital</title>
-      </Head>
+      <Head><title>Iniciar Sesión – Minuta Digital</title></Head>
       <div className={styles.wrapper}>
         <div className={styles.left} />
         <div className={styles.right}>
           <Card className={styles.card}>
-            {/* Header en blanco */}
             <div className={styles.cardHeader} />
-
             <Card.Body className="p-4">
               <div className={styles.logo}>
                 <Image
@@ -91,14 +126,14 @@ export default function LoginPage() {
               {error && <Alert variant="danger">{error}</Alert>}
 
               <Form onSubmit={handleSubmit}>
-                <Form.Group controlId="email" className="mb-3">
-                  <Form.Label className={styles.label}>Correo Electrónico</Form.Label>
+                <Form.Group controlId="user" className="mb-3">
+                  <Form.Label className={styles.label}>Usuario</Form.Label>
                   <Form.Control
-                    type="email"
-                    placeholder="tu@empresa.com"
-                    value={email}
+                    type="text"
+                    placeholder="ej.: kat.acosta"
+                    value={userOrEmail}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      setEmail(e.target.value)
+                      setUserOrEmail(e.target.value)
                       if (error) setError(null)
                     }}
                     required
@@ -120,7 +155,7 @@ export default function LoginPage() {
                 </Form.Group>
 
                 <Button type="submit" className={styles.button} disabled={loading}>
-                  {loading ? (<><Spinner animation="border" size="sm" /> Iniciando…</>) : 'Iniciar Sesión'}
+                  {loading ? (<><Spinner animation="border" size="sm" /> Iniciando…</>) : 'Entrar'}
                 </Button>
               </Form>
             </Card.Body>

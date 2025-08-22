@@ -1,0 +1,243 @@
+/* === Layout general de la página === */
+.page {
+  min-height: 100vh;
+  padding: var(--space-6) var(--space-4) var(--space-10);
+  background: var(--color-bg);
+}
+
+.wrapper {
+  width: min(920px, 94vw);
+  margin-inline: auto;
+}
+
+/* Tarjeta contenedora */
+.card {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: clamp(16px, 2.8vw, 28px);
+}
+
+/* Header de la tarjeta */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.title {
+  font-size: clamp(1.6rem, 1.2rem + 1vw, 2rem);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--title);
+}
+.back {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  line-height: 1;
+}
+.back:hover { filter: brightness(1.03); }
+.back:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* Grid del formulario */
+.formGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-4) var(--space-6);
+}
+.full { grid-column: 1 / -1; }
+
+/* Campo base */
+.field { display: flex; flex-direction: column; gap: 6px; }
+.label {
+  font-weight: 600;
+  color: var(--text);
+  font-size: .94rem;
+}
+
+/* Inputs base */
+.input, .textarea, .select {
+  width: 100%;
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  transition: box-shadow .15s ease, border-color .15s ease, background .15s ease;
+}
+.input::placeholder, .textarea::placeholder {
+  color: var(--text-muted);
+}
+.input:focus, .textarea:focus, .select:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: var(--focus-ring);
+  background: var(--surface);
+}
+
+/* Textarea */
+.textarea { min-height: 160px; resize: vertical; }
+
+/* Time inputs: look consistente cross-browser */
+.time {
+  appearance: none;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+}
+.time::-webkit-calendar-picker-indicator { filter: contrast(0) invert(.35); opacity: .8; }
+.time::-webkit-datetime-edit { padding: 0 2px; }
+.time::-webkit-datetime-edit-ampm-field,
+.time::-webkit-datetime-edit-second-field { color: var(--text-muted); }
+
+/* Ayuda y error */
+.help {
+  color: var(--text-muted);
+  font-size: .85rem;
+}
+.error {
+  margin-top: 6px;
+  color: var(--danger);
+  font-weight: 600;
+  font-size: .85rem;
+}
+
+/* Uploader (file) */
+.fileRow {
+  display: flex; align-items: center; gap: var(--space-3);
+  flex-wrap: wrap;
+}
+.fileBtn {
+  position: relative;
+  overflow: hidden;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.fileBtn:hover { filter: brightness(1.03); }
+.fileBtn input[type="file"] {
+  position: absolute; inset: 0;
+  opacity: 0; cursor: pointer;
+}
+.fileName {
+  color: var(--text-muted);
+  font-size: .92rem;
+}
+
+/* Zona “drag & drop” opcional */
+.dropzone {
+  border: 1.5px dashed var(--border);
+  background: linear-gradient(180deg, rgba(2,75,158,.04), rgba(2,75,158,.02));
+  padding: 14px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  text-align: center;
+}
+.dropzone.drag { border-color: var(--primary); box-shadow: var(--focus-ring); }
+
+/* Acciones */
+.actions {
+  display: flex; gap: var(--space-3);
+  margin-top: var(--space-6);
+  justify-content: flex-end;
+}
+.primary {
+  background: var(--primary);
+  color: #fff;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: 10px 16px;
+  box-shadow: var(--shadow-sm);
+  font-weight: 700;
+}
+.primary:hover { background: var(--primary-strong); }
+.primary:disabled { opacity: .6; pointer-events: none; }
+.ghost {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 16px;
+}
+.ghost:hover { filter: brightness(1.03); }
+
+/* Banner de éxito */
+.success {
+  margin-top: var(--space-4);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(34,197,94,.12);
+  border: 1px solid rgba(34,197,94,.35);
+  color: #0f5132;
+}
+
+/* Overlay de guardado */
+.saving {
+  position: relative;
+}
+.saving::after {
+  content: "Guardando…";
+  position: absolute;
+  inset: 0;
+  background: rgba(255,255,255,.6);
+  color: var(--text);
+  display: grid; place-items: center;
+  border-radius: var(--radius-lg);
+  backdrop-filter: blur(1px);
+}
+
+/* Responsive */
+@media (max-width: 860px) {
+  .formGrid { grid-template-columns: 1fr; }
+  .actions { justify-content: stretch; }
+  .actions > * { flex: 1; }
+}
+
+/* Dark tweaks (usa tus tokens) */
+@media (prefers-color-scheme: dark) {
+  .success { color: #d1fae5; }
+  .saving::after { background: rgba(0,0,0,.25); color: var(--text); }
+}
+
+/* === Ocultar cualquier uploader legacy mientras no haya minuteId === */
+/* Aplica SOLO cuando el contenedor tenga la clase .hideLegacyAttach (la agrega nueva.tsx
+   cuando minuteId es null). Usamos selectores amplios para cubrir CSS Modules. */
+.hideLegacyAttach :global(input[type="file"]),
+.hideLegacyAttach :global([data-legacy-uploader]),
+.hideLegacyAttach :global(.dropzone),
+.hideLegacyAttach :global(.uploader),
+.hideLegacyAttach :global(.file-uploader),
+.hideLegacyAttach :global(.react-dropzone),
+.hideLegacyAttach :global(.dz),
+.hideLegacyAttach :global([class*="dropzone"]),
+.hideLegacyAttach :global([class*="uploader"]),
+.hideLegacyAttach :global([class*="fileRow"]),
+.hideLegacyAttach :global([class*="fileBtn"]),
+.hideLegacyAttach :global([class*="chooseFile"]),
+.hideLegacyAttach :global([class*="attachments"]),
+.hideLegacyAttach :global([class*="Attachment"]) {
+  display: none !important;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  height: 0 !important;
+  width: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Si el uploader legacy viene envuelto en un contenedor, también lo colapsamos */
+.hideLegacyAttach :global(.dropzone + *),
+.hideLegacyAttach :global([class*="fileRow"] + *),
+.hideLegacyAttach :global([class*="uploader"] + *),
+.hideLegacyAttach :global([class*="attachments"] + *) {
+  pointer-events: none !important;
+}

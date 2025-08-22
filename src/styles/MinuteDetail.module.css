@@ -1,0 +1,72 @@
+/* src/styles/MinuteDetail.module.css */
+
+/* Variables locales al wrapper en color corporativo */
+.wrapper {
+  --mdx-accent: #009ada;          /* acento principal */
+  --mdx-accent-2: #009ada;        /* acento secundario (mismo color solicitado) */
+  --mdx-ink: #0b1324;
+  --mdx-ink-muted: #6b7280;
+  --mdx-bg: #ffffff;
+  --mdx-card: rgba(255,255,255,0.72);
+  --mdx-border: rgba(15,23,42,0.08);
+  --mdx-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+
+  padding-bottom: 32px;
+}
+
+/* ===== HERO ===== */
+.hero {
+  border-radius: 18px;
+  margin: 16px 0 20px;
+  /* Gradiente con el color de marca; se desvanece a blanco */
+  background:
+    radial-gradient(120% 120% at 0% 0%, color-mix(in srgb, var(--mdx-accent) 85%, white) 0%, color-mix(in srgb, var(--mdx-accent-2) 55%, white) 40%, transparent 70%),
+    linear-gradient(180deg, #f9fafb 0%, #ffffff 80%);
+  border: 1px solid var(--mdx-border);
+  box-shadow: var(--mdx-shadow);
+}
+
+.heroContent { padding: 18px 20px; }
+.breadcrumb { display: flex; justify-content: flex-start; }
+.backBtn { color: var(--mdx-ink-muted) !important; text-decoration: none !important; padding-left: 0 !important; }
+
+.titleRow { display: flex; align-items: baseline; gap: 12px; margin-top: 4px; }
+.title { margin: 0; font-weight: 800; letter-spacing: -0.3px; color: var(--mdx-ink); }
+
+.folioPill {
+  display: inline-flex; align-items: center; gap: 6px; font-weight: 700;
+  color: var(--mdx-accent);
+  background: color-mix(in srgb, var(--mdx-accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--mdx-accent) 25%, transparent);
+  padding: 4px 10px; border-radius: 999px;
+}
+
+.meta { display: flex; flex-wrap: wrap; gap: 10px 14px; margin-top: 8px; }
+.metaItem { display: inline-flex; align-items: center; gap: 6px; color: var(--mdx-ink); font-weight: 500; }
+.metaItemMuted { color: var(--mdx-ink-muted); font-size: 12px; }
+.code { background: rgba(2, 6, 23, 0.04); padding: 2px 6px; border-radius: 6px; }
+
+/* ===== GRID PRINCIPAL ===== */
+.grid { margin-top: 10px; row-gap: 20px; }
+
+/* ===== CARDS ===== */
+.card {
+  background: var(--mdx-card) !important;
+  border: 1px solid var(--mdx-border) !important;
+  backdrop-filter: blur(6px);
+  box-shadow: var(--mdx-shadow);
+  border-radius: 14px !important;
+}
+.cardHeader {
+  font-weight: 700;
+  border-bottom: 1px solid var(--mdx-border) !important;
+  background: linear-gradient(180deg, rgba(2,6,23,0.02), transparent);
+  display: flex; align-items: center; justify-content: space-between;
+}
+.badgePill { border-radius: 999px; }
+
+/* ===== KEY-VALUE GRID ===== */
+.kvGrid { display: grid; grid-template-columns: minmax(160px, 220px) 1fr; gap: 10px 16px; line-height: 1.4; }
+.k { color: var(--mdx-ink-muted); font-weight: 600; display: inline-flex; align-items: center; gap: 8px; }
+.v { color: var(--mdx-ink); font-weight: 500; }
+.muted { color: var(--mdx-ink-muted); }

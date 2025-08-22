@@ -1,0 +1,146 @@
+/* Grid moderno para evidencias */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+/* Tarjeta de archivo */
+.item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease, background .12s ease;
+}
+.item:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
+  box-shadow: 0 6px 18px rgba(0,0,0,.12);
+  background: color-mix(in oklab, var(--surface) 70%, var(--surface-2));
+}
+
+/* Icono */
+.iconWrap {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  box-shadow: var(--shadow-sm);
+  background: linear-gradient(180deg, rgba(2, 132, 199, .12), rgba(2, 132, 199, .06));
+  border: 1px solid color-mix(in oklab, var(--primary) 40%, var(--border));
+}
+.icon {
+  font-size: 18px;
+  color: var(--primary);
+}
+
+/* Nombre y meta */
+.text {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+.name {
+  color: var(--text);
+  font-weight: 650;
+  font-size: .96rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chip {
+  font-size: .74rem;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface);
+}
+
+/* Variantes por tipo */
+.t-image { border-color: rgba(59,130,246,.35); color: #3b82f6; }
+.t-pdf   { border-color: rgba(248,113,113,.35); color: #ef4444; }
+.t-doc   { border-color: rgba(96,165,250,.35); color: #60a5fa; }
+.t-xls   { border-color: rgba(34,197,94,.35); color: #22c55e; }
+.t-zip   { border-color: rgba(234,179,8,.35);  color: #eab308; }
+.t-other {}
+
+/* Acción (abrir en pestaña) */
+.action {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px; height: 34px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  transition: background .15s ease, border-color .15s ease, color .15s ease;
+}
+.action:hover {
+  color: var(--text);
+  background: var(--surface);
+  border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
+}
+
+/* Vacío */
+.empty {
+  margin-top: 8px;
+  border: 1.5px dashed var(--border);
+  color: var(--text-muted);
+  background: linear-gradient(180deg, rgba(2,75,158,.04), rgba(2,75,158,.02));
+  padding: 16px;
+  border-radius: var(--radius-md);
+  text-align: center;
+}
+
+/* Ayuda del uploader */
+.helpRow {
+  margin-top: 6px;
+  font-size: .86rem;
+  color: var(--text-muted);
+}
+
+/* Modo oscuro */
+@media (prefers-color-scheme: dark) {
+  .item:hover { box-shadow: 0 6px 20px rgba(0,0,0,.22); }
+}
+/* === Toolbar del uploader (oculta input nativo feo) === */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Oculta el input nativo pero deja accesible vía botón */
+.inputHidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+/* Texto “Ningún archivo…” estilizado */
+.placeholder {
+  font-size: .92rem;
+  color: var(--text-muted);
+}

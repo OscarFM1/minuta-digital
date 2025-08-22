@@ -1,163 +1,270 @@
-// src/lib/minutes.ts
-import { supabase } from './supabaseClient';
-import type { Minute, MinuteId, MinuteFormValues, MinuteUpdate } from '@/types/minute';
+/**
+ * Capa de acceso a datos para MINUTAS.
+ * - Inserción tolerante a esquema (user_id / created_by, y columnas opcionales).
+ * - Folio consistente con RPC + fallback.
+ * - Tipos y selects seguros.
+ */
 
-/** Normaliza la respuesta de la RPC a { folio, folio_serial } o nulls. */
-function extractFolioFromRpc(rpcData: any): { folio: string | null; folio_serial: number | null } {
-  const row = Array.isArray(rpcData) ? rpcData?.[0] : rpcData;
+import { supabase } from "@/lib/supabaseClient";
+import type { Minute } from "@/types/minute";
+import { buildFolioForInsert } from "@/lib/folio";
 
-  if (row == null) return { folio: null, folio_serial: null };
+// ---------------------------------
+// Detecciones cacheadas de columnas
+// ---------------------------------
 
-  // Caso: función devuelve un único valor (string/number) -> lo tratamos como next_folio
-  if (typeof row === 'string' || typeof row === 'number') {
-    const s = String(row);
-    const serial = parseInt(s, 10);
-    return {
-      folio: s.padStart(4, '0'),
-      folio_serial: Number.isNaN(serial) ? null : serial,
-    };
-  }
+let ownerColumnCache: "user_id" | "created_by" | "none" | null = null;
+const columnExistsCache: Record<string, boolean> = {};
 
-  // Caso: { folio, folio_serial }
-  if (typeof row.folio === 'string' && typeof row.folio_serial === 'number') {
-    return { folio: row.folio, folio_serial: row.folio_serial };
-  }
-
-  // Caso: { next_folio: '0012' }
-  if (typeof row.next_folio === 'string') {
-    const n = parseInt(row.next_folio, 10);
-    return {
-      folio: row.next_folio,
-      folio_serial: Number.isNaN(n) ? null : n,
-    };
-  }
-
-  return { folio: null, folio_serial: null };
+/** Detecta si existe una columna en public.minute (cacheado). */
+async function hasColumn(col: string): Promise<boolean> {
+  if (col in columnExistsCache) return columnExistsCache[col];
+  const { error } = await supabase.from("minute").select(`id, ${col}`).limit(1);
+  const ok = !error;
+  columnExistsCache[col] = ok;
+  return ok;
 }
 
-/** Obtiene una minuta por ID (incluye folio y fecha). */
-export async function getMinuteById(id: MinuteId): Promise<Minute> {
-  const { data, error } = await supabase
-    .from('minute')
-    .select(`
-      id, user_id,
-      folio, folio_serial, date,
-      start_time, end_time, tarea_realizada, novedades, description,
-      created_by_name, created_by_email, created_at, updated_at
-    `)
-    .eq('id', id)
-    .single();
-
-  if (error) throw new Error(`Error al cargar la minuta: ${error.message}`);
-  return data as Minute;
+/** ¿La tabla tiene columna description? */
+async function hasDescriptionColumn() {
+  return hasColumn("description");
 }
 
 /**
- * Crea una minuta.
- * - Intenta obtener el folio por usuario vía RPC (tolerante a distintos "shapes").
- * - Envía strings seguros (sin null) para respetar NOT NULL de la tabla.
+ * Detecta la columna de “dueño” que existe en tu instancia.
+ * Devuelve "user_id", "created_by" o "none".
  */
-export async function createMinute(values: MinuteFormValues): Promise<Minute> {
-  const { data: userData, error: userErr } = await supabase.auth.getUser();
-  if (userErr) throw new Error(`No se pudo obtener el usuario: ${userErr.message}`);
-  const user = userData.user;
-  if (!user) throw new Error('No hay sesión activa.');
+async function detectOwnerColumn(): Promise<"user_id" | "created_by" | "none"> {
+  if (ownerColumnCache) return ownerColumnCache;
 
-  const today = new Date().toISOString().split('T')[0]; // "YYYY-MM-DD"
+  {
+    const { error } = await supabase.from("minute").select("id,user_id").limit(1);
+    if (!error) {
+      ownerColumnCache = "user_id";
+      return ownerColumnCache;
+    }
+  }
+  {
+    const { error } = await supabase.from("minute").select("id,created_by").limit(1);
+    if (!error) {
+      ownerColumnCache = "created_by";
+      return ownerColumnCache;
+    }
+  }
+  ownerColumnCache = "none";
+  return ownerColumnCache;
+}
 
-  // Normaliza texto
-  const tarea = (values.tarea_realizada ?? '').trim();
-  const novedades = (values.novedades ?? '').trim();
-  const novedadesValue = novedades.length ? novedades : null;
+// ------------------
+// Helpers de usuario
+// ------------------
 
-  // --- RPC de folio (defensivo: soporta {folio, folio_serial}, {next_folio} o escalar)
-  let folio_serial: number | null = null;
-  let folio: string | null = null;
-  try {
-    const { data: rpcData } = await supabase.rpc('next_minute_folio_for_user', {
-      p_user_id: user.id,
-    });
-    const parsed = extractFolioFromRpc(rpcData);
-    folio = parsed.folio;
-    folio_serial = parsed.folio_serial;
-  } catch {
-    // Si la RPC no existe o falla, seguimos sin folio (el UI cae a fallback visible).
+/** Devuelve el user id o lanza error claro. */
+async function getCurrentUserId(): Promise<string> {
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data.user) throw new Error("No hay sesión activa.");
+  return data.user.id;
+}
+
+/** Devuelve {name, email} del usuario actual (metadata común). */
+async function getCurrentUserIdentity(): Promise<{ name: string | null; email: string | null }> {
+  const { data } = await supabase.auth.getUser();
+  const u = data.user;
+  const meta = (u?.user_metadata ?? {}) as Record<string, any>;
+  const name =
+    (meta.full_name as string) ??
+    (meta.name as string) ??
+    (meta.display_name as string) ??
+    null;
+  const email = (u?.email as string) ?? null;
+  return { name, email };
+}
+
+// -------------------------------
+// Folio con RPC + fallback local
+// -------------------------------
+
+async function nextFolioForUser(userId: string): Promise<number> {
+  const rpc = await supabase.rpc("next_minute_folio_for_user", { p_user_id: userId });
+  if (!rpc.error && typeof rpc.data === "number") return rpc.data;
+
+  const ownerCol = await detectOwnerColumn();
+  let query = supabase.from("minute").select("folio").order("folio", { ascending: false }).limit(1);
+  if (ownerCol === "user_id") query = query.eq("user_id", userId);
+  else if (ownerCol === "created_by") query = query.eq("created_by", userId);
+
+  const { data } = await query;
+  const n = Number(data?.[0]?.folio);
+  return Number.isFinite(n) ? n + 1 : 1;
+}
+
+// --------------------------------------
+// Inserción tolerante a columna de dueño
+// --------------------------------------
+
+async function insertMinuteWithOwner(base: Record<string, unknown>, userId: string): Promise<Minute> {
+  const detected = await detectOwnerColumn();
+
+  const candidates: Array<Record<string, unknown>> = [];
+  if (detected === "user_id") {
+    candidates.push({ ...base, user_id: userId });
+    candidates.push({ ...base, created_by: userId });
+  } else if (detected === "created_by") {
+    candidates.push({ ...base, created_by: userId });
+    candidates.push({ ...base, user_id: userId });
+  } else {
+    candidates.push({ ...base }); // instancia sin columna de dueño
   }
 
-  const { data, error } = await supabase
-    .from('minute')
-    .insert({
-      user_id: user.id,
-      folio_serial,
-      folio,
-      date: today,
-      start_time: values.start_time,      // TIME "HH:MM"
-      end_time: values.end_time,          // TIME "HH:MM"
-      tarea_realizada: tarea,             // nunca null
-      description: tarea,                 // espejo de tarea_realizada
-      novedades: novedadesValue,          // null cuando está vacío
-      created_by_name: user.user_metadata?.full_name ?? null,
-      created_by_email: user.email ?? null,
-    })
-    .select('*')
-    .single();
+  let lastErr: any = null;
+  for (const payload of candidates) {
+    const { data, error } = await supabase.from("minute").insert(payload).select().single();
+    if (!error) return data as Minute;
 
-  if (error) throw new Error(`No fue posible crear la minuta: ${error.message}`);
+    const msg = (error.message || "").toLowerCase();
+    const missing = msg.includes("could not find") || msg.includes("does not exist") || msg.includes("unknown column");
+    if (missing) {
+      lastErr = error;
+      continue;
+    }
+    throw error;
+  }
+  throw lastErr ?? new Error("No fue posible insertar la minuta (columna dueño desconocida).");
+}
+
+// -------------------------------
+// API pública
+// -------------------------------
+
+/**
+ * createMinute:
+ * - Fecha/horas opcionales (Start/Stop completan después).
+ * - Rellena folio y dueño.
+ * - Si existen, setea created_by_name / created_by_email y description.
+ */
+export async function createMinute(input: {
+  date?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+  tarea_realizada: string;
+  novedades?: string | null;
+  is_protected?: boolean;
+  description?: string; // opcional; solo si existe la columna
+}): Promise<Minute> {
+  const userId = await getCurrentUserId();
+  const { name, email } = await getCurrentUserIdentity();
+
+  // Folio consistente
+  const nextFolio = await nextFolioForUser(userId);
+  const { folio, folio_serial } = buildFolioForInsert(nextFolio);
+
+  const base: Record<string, unknown> = {
+    tarea_realizada: input.tarea_realizada,
+    novedades: input.novedades ?? null,
+    is_protected: input.is_protected ?? false,
+    folio,
+    folio_serial,
+  };
+
+  // Opcionales
+  if (input.date != null) base.date = input.date;
+  if (input.start_time != null) base.start_time = input.start_time;
+  if (input.end_time != null) base.end_time = input.end_time;
+
+  // Campos de identidad (solo si existen las columnas)
+  if (await hasColumn("created_by_name")) base.created_by_name = name;
+  if (await hasColumn("created_by_email")) base.created_by_email = email;
+
+  // description (si existe columna y viene dato)
+  if (input.description && (await hasDescriptionColumn())) {
+    base.description = input.description;
+  }
+
+  const row = await insertMinuteWithOwner(base, userId);
+  return row;
+}
+
+/** updateMinute: patch seguro y devuelve fila actualizada. */
+export async function updateMinute(
+  id: string,
+  patch: {
+    start_time?: string | null;
+    end_time?: string | null;
+    tarea_realizada?: string;
+    novedades?: string | null;
+    is_protected?: boolean;
+  }
+): Promise<Minute> {
+  const { data, error } = await supabase.from("minute").update(patch).eq("id", id).select().single();
+  if (error) throw error;
   return data as Minute;
 }
 
-/** Actualiza campos editables (sincroniza description con tarea_realizada). */
-export async function updateMinute(id: MinuteId, patch: MinuteUpdate): Promise<Minute> {
-  const body: Record<string, any> = { ...patch };
-
-  if (typeof patch.tarea_realizada === 'string') {
-    const t = patch.tarea_realizada.trim();
-    body.tarea_realizada = t;
-    body.description = t; // mantener espejo
-  }
-  if (typeof patch.novedades === 'string') {
-    const n = patch.novedades.trim();
-    body.novedades = n.length ? n : null;
-  }
-
-  const { data, error } = await supabase
-    .from('minute')
-    .update(body)
-    .eq('id', id)
-    .select('*')
-    .single();
-
-  if (error) throw new Error(`No fue posible actualizar la minuta: ${error.message}`);
+/** getMinuteById: devuelve la fila o null si no existe. */
+export async function getMinuteById(id: string): Promise<Minute | null> {
+  const { data, error } = await supabase.from("minute").select("*").eq("id", id).single();
+  if (error) return null;
   return data as Minute;
 }
 
-/** Sube un archivo al bucket 'attachments' y devuelve el storage path. */
-export async function uploadAttachment(file: File, minuteId: MinuteId): Promise<string> {
-  const sanitizedName = file.name.replace(/[^\w.\-]/g, '_');
-  const path = `${minuteId}/${Date.now()}_${sanitizedName}`;
+/** listMyMinutes: lista del usuario actual. */
+export async function listMyMinutes(): Promise<Minute[]> {
+  const userId = await getCurrentUserId();
+  const ownerCol = await detectOwnerColumn();
 
-  const { error: upErr } = await supabase.storage
-    .from('attachments')
-    .upload(path, file, {
-      contentType: file.type || 'application/octet-stream',
-      upsert: false,
-    });
+  let query = supabase
+    .from("minute")
+    .select(
+      `
+      id, date, start_time, end_time, tarea_realizada, novedades,
+      folio, folio_serial, created_at, updated_at, is_protected,
+      created_by_name, created_by_email, user_id, created_by
+    `
+    )
+    .order("date", { ascending: false })
+    .order("start_time", { ascending: false });
 
-  if (upErr) throw new Error(`No fue posible subir el archivo ${file.name}: ${upErr.message}`);
-  return path;
+  if (ownerCol === "user_id") query = query.eq("user_id", userId);
+  else if (ownerCol === "created_by") query = query.eq("created_by", userId);
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data ?? []) as Minute[];
 }
 
-/** Inserta registros en 'attachment' (envía created_by para evitar NULLs). */
-export async function createAttachmentRecords(minuteId: MinuteId, paths: string[]) {
-  if (!paths.length) return;
+/** listAllMinutesForAdmin: listado global (RLS según admin). */
+export async function listAllMinutesForAdmin(): Promise<Minute[]> {
+  const { data, error } = await supabase
+    .from("minute")
+    .select(
+      `
+      id, date, start_time, end_time, tarea_realizada, novedades,
+      folio, folio_serial, created_at, updated_at, is_protected,
+      created_by_name, created_by_email, user_id, created_by
+    `
+    )
+    .order("date", { ascending: false })
+    .order("start_time", { ascending: false });
 
-  const { data: userData, error: uErr } = await supabase.auth.getUser();
-  if (uErr) throw new Error(`No se pudo obtener el usuario: ${uErr.message}`);
-  const userId = userData.user?.id;
-  if (!userId) throw new Error('No hay sesión activa.');
+  if (error) throw error;
+  return (data ?? []) as Minute[];
+}
 
-  const payload = paths.map((p) => ({ minute_id: minuteId, path: p, created_by: userId }));
+// START/STOP con hora del servidor (RPC)
+export async function startMinute(minuteId: string): Promise<Minute> {
+  const { data: auth } = await supabase.auth.getUser();
+  const userId = auth.user?.id;
+  if (!userId) throw new Error("No hay sesión.");
+  const { data, error } = await supabase.rpc("minute_start", { p_minute_id: minuteId, p_user_id: userId });
+  if (error) throw error;
+  return data as Minute;
+}
 
-  const { error } = await supabase.from('attachment').insert(payload);
-  if (error) throw new Error(`No fue posible registrar adjuntos: ${error.message}`);
+export async function stopMinute(minuteId: string): Promise<Minute> {
+  const { data: auth } = await supabase.auth.getUser();
+  const userId = auth.user?.id;
+  if (!userId) throw new Error("No hay sesión.");
+  const { data, error } = await supabase.rpc("minute_stop", { p_minute_id: minuteId, p_user_id: userId });
+  if (error) throw error;
+  return data as Minute;
 }

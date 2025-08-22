@@ -1,19 +1,41 @@
 // src/components/MinuteForm.tsx
-import { useEffect, useMemo, useState } from 'react';
-import { useDebouncedCallback } from '@/hooks/useDebouncedCallback';
-import { createAttachmentRecords, createMinute, updateMinute, uploadAttachment } from '@/lib/minutes';
-import type { Minute, MinuteFormValues, MinuteId } from '@/types/minute';
-import styles from '@/styles/Minutas.module.css';
+/**
+ * Formulario de crear/editar Minuta
+ * - Crear: "Título de tarea" + "Tarea a realizar" (sin Novedades)
+ * - Editar: "Tarea realizada" + Novedades (opcional)
+ * - Start/Stop son la fuente de verdad para horas (no se editan aquí)
+ * - Normaliza '' -> null antes de persistir
+ */
+
+import { useEffect, useMemo, useState } from 'react'
+import { useDebouncedCallback } from '@/hooks/useDebouncedCallback'
+import { createMinute, updateMinute } from '@/lib/minutes'
+import { uploadAttachment, createAttachmentRecords } from '@/lib/uploadAttachment'
+import type { Minute } from '@/types/minute'
+import ui from '@/styles/NewMinute.module.css'
+
+/** Valores que este form maneja (sin horas) */
+type FormValues = {
+  tarea_realizada: string
+  novedades: string
+}
+
+type MinuteId = string
 
 interface MinuteFormProps {
-  mode: 'create' | 'edit';
-  minuteId?: MinuteId;
-  initialValues?: MinuteFormValues;
-  onSaved?: (minute: Minute) => void;
-  onCancel?: () => void;
-  requireAttachmentOnCreate?: boolean;
-  enableAutosave?: boolean;
-  autosaveDelayMs?: number;
+  mode: 'create' | 'edit'
+  minuteId?: MinuteId
+  /** Para editar: valores iniciales */
+  initialValues?: Partial<FormValues>
+  onSaved?: (minute: Minute) => void
+  onCancel?: () => void
+  /** En crear ya no pedimos adjuntos; déjalo en false */
+  requireAttachmentOnCreate?: boolean
+  /** Autoguardado solo en edit */
+  enableAutosave?: boolean
+  autosaveDelayMs?: number
+  /** Si algún día quisieras permitir novedades en create, actívalo */
+  allowNovedadesInCreate?: boolean
 }
 
 export default function MinuteForm({
@@ -22,251 +44,273 @@ export default function MinuteForm({
   initialValues,
   onSaved,
   onCancel,
-  requireAttachmentOnCreate = true,
+  requireAttachmentOnCreate = false,
   enableAutosave,
   autosaveDelayMs = 800,
+  allowNovedadesInCreate = false,
 }: MinuteFormProps) {
   // Valores iniciales
-  const init = useMemo<MinuteFormValues>(
-    () =>
-      initialValues ?? {
-        start_time: '',
-        end_time: '',
-        tarea_realizada: '',
-        novedades: '',
-      },
+  const init = useMemo<FormValues>(
+    () => ({
+      tarea_realizada: initialValues?.tarea_realizada ?? '',
+      novedades: initialValues?.novedades ?? '',
+    }),
     [initialValues]
-  );
+  )
 
-  // Estado
-  const [values, setValues] = useState<MinuteFormValues>(init);
-  const [lastSaved, setLastSaved] = useState<MinuteFormValues>(init); // para detectar cambios
-  const [files, setFiles] = useState<File[]>([]);
-  const [saving, setSaving] = useState(false);
-  const [autoStatus, setAutoStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Estado del form
+  const [values, setValues] = useState<FormValues>(init)
+  const [lastSaved, setLastSaved] = useState<FormValues>(init)
+  const [title, setTitle] = useState<string>('') // "Título de tarea" -> description
+  const [files, setFiles] = useState<File[]>([])
+  const [saving, setSaving] = useState(false)
+  const [autoStatus, setAutoStatus] =
+    useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [drag, setDrag] = useState(false)
 
-  const autosaveEnabled = enableAutosave ?? (mode === 'edit');
+  const autosaveEnabled = enableAutosave ?? mode === 'edit'
+  const showNovedades = mode === 'edit' || allowNovedadesInCreate
 
   useEffect(() => {
-    // Si SWR refresca initialValues, reseteamos el form y el lastSaved
-    setValues(init);
-    setLastSaved(init);
-  }, [init]);
+    setValues(init)
+    setLastSaved(init)
+  }, [init])
 
-  // -------- Helpers de validación/cambio --------
-  const isSame = (a: MinuteFormValues, b: MinuteFormValues) =>
-    a.start_time === b.start_time &&
-    a.end_time === b.end_time &&
-    a.tarea_realizada === b.tarea_realizada &&
-    a.novedades === b.novedades;
+  // -------- Helpers --------
+  const isSame = (a: FormValues, b: FormValues) =>
+    a.tarea_realizada === b.tarea_realizada && a.novedades === b.novedades
 
-  // Reglas para AUTOGUARDAR (más permissive: no muestra error si faltan campos)
-  const canAutosave = (v: MinuteFormValues): boolean => {
-    if (!v.start_time || !v.end_time) return false;
-    if (!v.tarea_realizada.trim()) return false;
-    if (v.end_time < v.start_time) return false;
-    return true;
-  };
-
-  // Reglas para SUBMIT manual (estrictas)
-  const validateForSubmit = (v: MinuteFormValues): string | null => {
-    if (!v.tarea_realizada.trim()) return 'La "tarea realizada" no puede estar vacía.';
-    if (!v.start_time) return 'La hora inicio es obligatoria.';
-    if (!v.end_time) return 'La hora fin es obligatoria.';
-    if (v.end_time < v.start_time) return 'La hora fin no puede ser menor que la hora inicio.';
+  const validateForSubmit = (): string | null => {
+    if (!values.tarea_realizada.trim())
+      return 'La "tarea" no puede estar vacía.'
     if (mode === 'create' && requireAttachmentOnCreate && files.length === 0) {
-      return 'Debes adjuntar al menos un archivo como evidencia.';
+      return 'Debes adjuntar al menos un archivo como evidencia.'
     }
-    return null;
-  };
-
-  // Cambios controlados
-  const onChangeField = (key: keyof MinuteFormValues, value: string) => {
-    setValues((prev) => ({ ...prev, [key]: value }));
-  };
+    return null
+  }
 
   // --- AUTOGUARDADO (solo edit) ---
-  const { debounced: debouncedAutosave } = useDebouncedCallback(async (snapshot: MinuteFormValues) => {
-    if (!autosaveEnabled || mode !== 'edit' || !minuteId) return;
+  const { debounced: debouncedAutosave } = useDebouncedCallback(
+    async (snapshot: FormValues) => {
+      if (!autosaveEnabled || mode !== 'edit' || !minuteId) return
+      if (isSame(snapshot, lastSaved)) {
+        setAutoStatus('idle')
+        return
+      }
 
-    // Si no hay cambios vs. última versión guardada → no hagas nada
-    if (isSame(snapshot, lastSaved)) {
-      setAutoStatus('idle');
-      return;
-    }
-
-    // Si aún no cumple mínimos → no guardar ni mostrar error, solo idle
-    if (!canAutosave(snapshot)) {
-      setAutoStatus('idle');
-      return;
-    }
-
-    try {
-      setAutoStatus('saving');
-      const updated = await updateMinute(minuteId, {
-        start_time: snapshot.start_time,
-        end_time: snapshot.end_time,
-        tarea_realizada: snapshot.tarea_realizada,
-        novedades: snapshot.novedades,
-      });
-      setLastSaved(snapshot); // marcamos este snapshot como la última versión guardada
-      setAutoStatus('saved');
-      onSaved?.(updated);
-      setTimeout(() => setAutoStatus('idle'), 1200);
-    } catch (e: any) {
-      // Solo mostramos error si el servidor falla (RLS, red, etc.)
-      setAutoStatus('error');
-      // NO seteamos errorMsg aquí para no ensuciar el formulario mientras escribe
-    }
-  }, autosaveDelayMs);
+      try {
+        setAutoStatus('saving')
+        const updated = await updateMinute(minuteId, {
+          tarea_realizada: snapshot.tarea_realizada,
+          novedades: snapshot.novedades.trim() ? snapshot.novedades : null,
+        })
+        setLastSaved(snapshot)
+        setAutoStatus('saved')
+        onSaved?.(updated)
+        setTimeout(() => setAutoStatus('idle'), 1200)
+      } catch {
+        setAutoStatus('error')
+      }
+    },
+    autosaveDelayMs
+  )
 
   useEffect(() => {
-    if (mode !== 'edit' || !autosaveEnabled) return;
-    debouncedAutosave(values);
+    if (mode !== 'edit' || !autosaveEnabled) return
+    debouncedAutosave(values)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [values.start_time, values.end_time, values.tarea_realizada, values.novedades]);
+  }, [values.tarea_realizada, values.novedades])
 
   // Submit manual (create o edit)
   const onSubmit = async () => {
-    const err = validateForSubmit(values);
+    const err = validateForSubmit()
     if (err) {
-      setErrorMsg(err);
-      return;
+      setErrorMsg(err)
+      return
     }
 
-    setSaving(true);
-    setErrorMsg(null);
+    setSaving(true)
+    setErrorMsg(null)
 
     try {
       if (mode === 'create') {
-        // 1) Crear la minuta
-        const created = await createMinute(values);
-        // 2) Subir adjuntos (si hay)
+        // Novedades se completan luego del Stop; aquí van como null
+        const created = await createMinute({
+          tarea_realizada: values.tarea_realizada,
+          description: title.trim() ? title.trim() : undefined,
+          novedades: null,
+        })
+
         if (files.length > 0) {
-          const paths: string[] = [];
+          const paths: string[] = []
           for (const f of files) {
-            const path = await uploadAttachment(f, created.id);
-            paths.push(path);
+            const path = await uploadAttachment(f, created.id)
+            paths.push(path)
           }
-          // 3) Registrar adjuntos
-          await createAttachmentRecords(created.id, paths);
+          await createAttachmentRecords(created.id, paths)
         }
-        setLastSaved(values);
-        onSaved?.(created);
+        setLastSaved(values)
+        onSaved?.(created)
       } else if (mode === 'edit' && minuteId) {
         const updated = await updateMinute(minuteId, {
-          start_time: values.start_time,
-          end_time: values.end_time,
           tarea_realizada: values.tarea_realizada,
-          novedades: values.novedades,
-        });
-        setLastSaved(values);
-        onSaved?.(updated);
+          novedades: values.novedades.trim() ? values.novedades : null,
+        })
+        setLastSaved(values)
+        onSaved?.(updated)
       }
     } catch (e: any) {
-      setErrorMsg(e.message ?? 'No fue posible guardar.');
+      setErrorMsg(e.message ?? 'No fue posible guardar.')
     } finally {
-      setSaving(false);
+      setSaving(false)
     }
-  };
+  }
+
+  // Helpers UI archivos (compatibilidad; en /minutas/nueva se ocultan hasta tener minuteId)
+  const onFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFiles(Array.from(e.target.files ?? []))
+  }
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const dropped = Array.from(e.dataTransfer.files ?? [])
+    if (dropped.length) setFiles((prev) => [...prev, ...dropped])
+  }
+  const fileNames = files.map((f) => f.name).join(', ')
 
   return (
     <form
-      className={styles.editForm}
+      className={`${ui.formGrid} ${saving ? ui.saving : ''}`}
       onSubmit={(e) => {
-        e.preventDefault();
-        onSubmit();
+        e.preventDefault()
+        onSubmit()
       }}
+      noValidate
     >
-      <div className={styles.formRow}>
-        <label>Hora inicio</label>
-        <input
-          type="time"
-          step={300}
-          value={values.start_time}
-          onChange={(e) => onChangeField('start_time', e.target.value)}
-          required
-        />
-      </div>
-
-      <div className={styles.formRow}>
-        <label>Hora fin</label>
-        <input
-          type="time"
-          step={300}
-          value={values.end_time}
-          onChange={(e) => onChangeField('end_time', e.target.value)}
-          required
-        />
-      </div>
-
-      <div className={styles.formCol}>
-        <label>Tarea realizada</label>
-        <textarea
-          rows={6}
-          placeholder="Describe la tarea realizada…"
-          value={values.tarea_realizada}
-          onChange={(e) => onChangeField('tarea_realizada', e.target.value)}
-          required
-        />
-      </div>
-
-      <div className={styles.formCol}>
-        <label>Novedades (opcional)</label>
-        <textarea
-          rows={4}
-          placeholder="Anota novedades, bloqueos o hallazgos…"
-          value={values.novedades}
-          onChange={(e) => onChangeField('novedades', e.target.value)}
-        />
-      </div>
-
+      {/* Título (solo crear) */}
       {mode === 'create' && (
-        <div className={styles.formCol}>
-          <label>Adjuntos {requireAttachmentOnCreate ? '(al menos 1)' : ''}</label>
+        <div className={ui.field}>
+          <label className={ui.label} htmlFor="title">
+            Título de tarea
+          </label>
           <input
-            type="file"
-            multiple
-            onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+            id="title"
+            type="text"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Ej.: Inventario de bodega A"
+            className={ui.input}
           />
-          {files.length > 0 && (
-            <div className={styles.hint}>
-              {files.length} archivo(s) seleccionado(s)
-            </div>
-          )}
         </div>
       )}
 
-      {errorMsg && <p className={styles.errorMsg}>{errorMsg}</p>}
+      {/* Tarea (create: a realizar / edit: realizada) */}
+      <div className={`${ui.field} ${ui.full}`}>
+        <label className={ui.label} htmlFor="tarea">
+          {mode === 'create' ? 'Tarea a realizar' : 'Tarea realizada'}
+        </label>
+        <textarea
+          id="tarea"
+          rows={6}
+          placeholder={
+            mode === 'create'
+              ? 'Describe qué vas a realizar…'
+              : 'Describe lo que realizaste…'
+          }
+          value={values.tarea_realizada}
+          onChange={(e) =>
+            setValues((prev: FormValues) => ({
+              ...prev,
+              tarea_realizada: e.target.value,
+            }))
+          }
+          className={ui.textarea}
+          required
+        />
+      </div>
 
-      <div className={styles.actions}>
+      {/* Novedades (solo en edit por defecto) */}
+      {showNovedades && (
+        <div className={`${ui.field} ${ui.full}`}>
+          <label className={ui.label} htmlFor="novedades">
+            Novedades (opcional)
+          </label>
+          <textarea
+            id="novedades"
+            rows={4}
+            placeholder="Anota novedades, bloqueos o hallazgos…"
+            value={values.novedades}
+            onChange={(e) =>
+              setValues((prev: FormValues) => ({
+                ...prev,
+                novedades: e.target.value,
+              }))
+            }
+            className={ui.textarea}
+          />
+        </div>
+      )}
+
+      {/* Adjuntos (se ocultan en /minutas/nueva hasta tener minuteId) */}
+      {mode === 'create' && (
+        <div className={`${ui.field} ${ui.full}`}>
+          <label className={ui.label}>
+            Adjuntos {requireAttachmentOnCreate ? '(al menos 1)' : ''}
+          </label>
+
+          <div className={ui.fileRow}>
+            <label className={ui.fileBtn}>
+              Elegir archivos
+              <input type="file" multiple onChange={onFiles} />
+            </label>
+            <span className={ui.fileName}>
+              {files.length > 0
+                ? `${files.length} archivo(s): ${fileNames}`
+                : 'Ningún archivo seleccionado'}
+            </span>
+          </div>
+
+          <div
+            className={`${ui.dropzone} ${drag ? ui.drag : ''}`}
+            onDragOver={(e) => e.preventDefault()}
+            onDragEnter={() => setDrag(true)}
+            onDragLeave={() => setDrag(false)}
+            onDrop={(e) => {
+              setDrag(false)
+              handleDrop(e)
+            }}
+          >
+            O arrastra y suelta aquí
+          </div>
+        </div>
+      )}
+
+      {/* Errores */}
+      {errorMsg && (
+        <div className={`${ui.error} ${ui.full}`} role="alert" aria-live="assertive">
+          {errorMsg}
+        </div>
+      )}
+
+      {/* Acciones */}
+      <div className={`${ui.actions} ${ui.full}`}>
         {mode === 'edit' && autosaveEnabled && (
-          <span className={styles.autosaveBadge}>
+          <span aria-live="polite" className={ui.help}>
             {autoStatus === 'saving' && 'Guardando…'}
             {autoStatus === 'saved' && 'Guardado ✓'}
             {autoStatus === 'error' && 'Error al autoguardar'}
-            {autoStatus === 'idle' && ' '}
           </span>
         )}
+
         {onCancel && (
-          <button
-            type="button"
-            className={styles.secondaryBtn}
-            onClick={onCancel}
-            disabled={saving}
-          >
+          <button type="button" className={ui.ghost} onClick={onCancel} disabled={saving}>
             Cancelar
           </button>
         )}
-        <button
-          type="submit"
-          className={styles.primaryBtn}
-          disabled={saving}
-        >
+        <button type="submit" className={ui.primary} disabled={saving} aria-busy={saving}>
           {saving ? 'Guardando…' : mode === 'create' ? 'Crear minuta' : 'Guardar'}
         </button>
       </div>
     </form>
-  );
+  )
 }

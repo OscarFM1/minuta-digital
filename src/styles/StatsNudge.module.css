@@ -1,0 +1,51 @@
+/* src/styles/StatsNudge.module.css
+   Nudge para llamar la atención sobre el filtro de Mes en Estadísticas.
+   - Punto pulsante + pill "Tip"
+   - Flecha hacia el selector
+*/
+
+.nudge {
+  display: inline-flex;
+  align-items: center;
+  gap: .5rem;
+  user-select: none;
+  pointer-events: none; /* no molesta los clics del selector al lado */
+}
+
+.pulseDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 9999px;
+  background: #009ada;
+  box-shadow: 0 0 0 0 rgba(0, 154, 218, 0.6);
+  animation: pulse 1.8s ease-out infinite;
+}
+
+@keyframes pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(0,154,218,.6); }
+  70%  { box-shadow: 0 0 0 12px rgba(0,154,218,0); }
+  100% { box-shadow: 0 0 0 0 rgba(0,154,218,0); }
+}
+
+.tipPill {
+  background: #e6f7ff;
+  color: #035d82;
+  border: 1px solid rgba(0, 154, 218, .25);
+  font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: .85rem;
+  white-space: nowrap;
+}
+
+.arrow {
+  font-size: 1.25rem;
+  line-height: 1;
+  transform: translateY(-1px);
+}
+
+/* En pantallas pequeñas no satures: oculta la flecha y encoge el pill */
+@media (max-width: 768px) {
+  .arrow { display: none; }
+  .tipPill { font-size: .8rem; }
+}

@@ -1,25 +1,28 @@
 /* ===========================
-   Tokens de color (light/dark)
+   Tokens globales de diseño
    =========================== */
 :root {
+  /* Base light */
   --background: #ffffff;
   --foreground: #171717;
 
   /* Accents */
   --accent: #01aded;
   --accent-contrast: #ffffff;
+  --primary: #4f8cff;            /* primario moderno */
+  --primary-strong: #3d7bff;
 
   /* Superficies y bordes */
-  --color-bg: #f7fafc;          /* fondo app */
-  --surface: #ffffff;           /* tarjeta/base */
+  --color-bg: #f7fafc;           /* fondo app */
+  --surface: #ffffff;            /* tarjeta/base */
   --surface-2: #f9fbfd;
   --border: #e6eef7;
   --border-strong: #cfe0f2;
 
   /* Tipografía */
   --font-sans: 'Inter', system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-  --text: #0f172a;              /* slate-900 */
-  --text-muted: #475569;        /* slate-600 */
+  --text: #0f172a;               /* slate-900 */
+  --text-muted: #475569;         /* slate-600 */
   --title: #024b9e;
 
   /* Sombra y focus ring */
@@ -42,6 +45,12 @@
   --space-6: 1.5rem;
   --space-8: 2rem;
   --space-10: 2.5rem;
+
+  /* Tokens extra (antes en Minutas.module.css) */
+  --success: #22c55e;
+  --danger: #ef4444;
+  --ring: #77a7ff;
+  --shadow: 0 10px 30px rgba(0,0,0,.25);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -62,6 +71,7 @@
     --shadow-sm: 0 2px 10px rgba(0,0,0,.35);
     --shadow-md: 0 8px 24px rgba(0,0,0,.45);
     --shadow-lg: 0 18px 48px rgba(0,0,0,.55);
+    --shadow: 0 10px 30px rgba(0,0,0,.45);
   }
 }
 
@@ -100,7 +110,11 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* Utilidad contenedor */
-.container { width: min(1200px, 92vw); margin-inline: auto; padding-inline: 1rem; }
+.container {
+  width: min(1200px, 92vw);
+  margin-inline: auto;
+  padding-inline: 1rem;
+}
 
 /* Cabeceras base */
 h1, h2, h3 { font-weight: 800; letter-spacing: -0.02em; line-height: 1.2; }
