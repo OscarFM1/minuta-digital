@@ -1,27 +1,28 @@
 // scripts/update-first-login.mjs
 /**
- * Fuerza user_metadata.first_login a TRUE para TODOS los usuarios (incluido admin),
- * o para un subconjunto de emails; también permite rollback (--unset).
+ * Actualiza user_metadata.first_login y (opcional) fuerza contraseña.
  *
  * Flags CLI:
- *   --all                      -> procesa TODOS los usuarios
- *   --emails=a@b.com,c@d.com   -> procesa sólo esos correos (case-insensitive)
- *   --dry-run                  -> no escribe, sólo muestra cambios
- *   --unset                    -> en vez de true, pone false (rollback)
+ *   --all                        -> procesa TODOS los usuarios
+ *   --emails=a@b.com,c@d.com     -> procesa sólo esos correos (case-insensitive)
+ *   --dry-run                    -> no escribe, sólo muestra lo que haría
+ *   --unset                      -> en vez de true, pone false (rollback de first_login)
+ *   --password=<clave>           -> fuerza password SÓLO a los correos de --emails
+ *   --password-all=<clave>       -> fuerza password a TODOS los que procese (¡peligroso!)
  *
  * Ejemplos:
  *   node scripts/update-first-login.mjs --all --dry-run
  *   node scripts/update-first-login.mjs --all
- *   node scripts/update-first-login.mjs --emails=operaciones@multi-impresos.com,kat.acosta@login.local
+ *   node scripts/update-first-login.mjs --emails=operaciones@multi-impresos.com --password=password
  *   node scripts/update-first-login.mjs --unset --all
  *
- * Requisitos de entorno (NO los publiques):
- *   NEXT_PUBLIC_SUPABASE_URL   = https://<tu-proyecto>.supabase.co
- *   SUPABASE_SERVICE_ROLE_KEY  = <service role key>  (sólo server)
+ * Requisitos (.env.local, NO subir a git):
+ *   NEXT_PUBLIC_SUPABASE_URL   = https://<ref>.supabase.co
+ *   SUPABASE_SERVICE_ROLE_KEY  = <service-role>
  */
 
 import dotenv from 'dotenv'
-// ⚠️ override: true => .env.local pisa variables ya definidas en el entorno
+// override:true => .env.local pisa variables previas del entorno
 dotenv.config({ path: '.env.local', override: true })
 
 import { createClient } from '@supabase/supabase-js'
@@ -31,18 +32,16 @@ const SUPABASE_URL = (process.env.NEXT_PUBLIC_SUPABASE_URL || '').trim()
 const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 
 if (!SUPABASE_URL || !SERVICE_ROLE_KEY) {
-  console.error('❌ ERROR: Faltan variables NEXT_PUBLIC_SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY.')
+  console.error('❌ ERROR: Faltan NEXT_PUBLIC_SUPABASE_URL o SUPABASE_SERVICE_ROLE_KEY.')
   process.exit(1)
 }
-
-// Validar formato de la URL para evitar ENOTFOUND por URLs mal armadas
+// Validar formato para evitar ENOTFOUND por URL mal formada
 const urlPattern = /^https:\/\/[a-z0-9-]+\.supabase\.co$/i
 if (!urlPattern.test(SUPABASE_URL)) {
   console.error(`❌ NEXT_PUBLIC_SUPABASE_URL inválida: "${SUPABASE_URL}"
 Debe verse como "https://<project-ref>.supabase.co" (sin underscores, sin slash final).`)
   process.exit(1)
 }
-
 console.log(`[ENV] Using SUPABASE_URL=${SUPABASE_URL}`)
 
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY, {
@@ -62,6 +61,18 @@ const EMAILS = emailsArg
       .map(s => s.trim().toLowerCase())
       .filter(Boolean)
   : []
+
+// Forzar contraseña (subset o todos)
+const pwdSubsetArg = args.find(a => a.startsWith('--password='))
+const pwdAllArg = args.find(a => a.startsWith('--password-all='))
+
+const PASSWORD_SUBSET = pwdSubsetArg?.split('=')[1] || null
+const PASSWORD_ALL = pwdAllArg?.split('=')[1] || null
+
+// Seguridad: si pasas --password (sin -all) pero NO diste --emails, no haremos nada con password.
+if (PASSWORD_SUBSET && EMAILS.length === 0) {
+  console.error('⚠️  Has pasado --password pero no --emails. Por seguridad, no se forzará ninguna contraseña.')
+}
 
 const DESIRED = UNSET ? false : true
 
@@ -92,6 +103,18 @@ function shouldProcessEmail(email) {
   if (MODE === 'SUBSET') return EMAILS.includes(e)
   return LEGACY_EMAILS.includes(e) // LEGACY
 }
+function shouldSetPassword(email) {
+  if (PASSWORD_ALL) return true
+  if (PASSWORD_SUBSET && EMAILS.length > 0) {
+    return EMAILS.includes(normalize(email))
+  }
+  return false
+}
+function passwordFor(email) {
+  if (PASSWORD_ALL) return PASSWORD_ALL
+  if (PASSWORD_SUBSET && EMAILS.includes(normalize(email))) return PASSWORD_SUBSET
+  return null
+}
 
 // ===== 5) Proceso principal =====
 async function main() {
@@ -109,7 +132,6 @@ async function main() {
     try {
       ({ data, error } = await admin.auth.admin.listUsers({ page, perPage: PER_PAGE }))
     } catch (e) {
-      // Captura errores de red (ENOTFOUND, etc.) con mensaje claro
       console.error(`✗ ERROR listUsers (page ${page}): ${e?.message || e}`)
       if (String(e?.message || '').includes('ENOTFOUND')) {
         console.error('→ Revisa NEXT_PUBLIC_SUPABASE_URL: parece no resolverse el DNS.')
@@ -130,29 +152,45 @@ async function main() {
       if (!shouldProcessEmail(email)) continue
 
       totalMatched++
-      const current = u.user_metadata?.first_login
-      const needsChange = current !== DESIRED
 
-      if (!needsChange) {
+      const current = u.user_metadata?.first_login
+      const needsMetaChange = current !== DESIRED
+      const willSetPass = shouldSetPassword(email)
+      const newPass = willSetPass ? passwordFor(email) : null
+
+      // Si no hay nada que cambiar, saltamos
+      if (!needsMetaChange && !willSetPass) {
         skipped++
         continue
       }
 
       if (DRY_RUN) {
-        console.log(`[DRY] ${email}: first_login ${String(current)} -> ${String(DESIRED)}`)
+        const parts = []
+        if (needsMetaChange) parts.push(`first_login ${String(current)} -> ${String(DESIRED)}`)
+        if (willSetPass) parts.push('password SET')
+        console.log(`[DRY] ${email}: ${parts.join(' | ')}`)
         updated++
         continue
       }
 
-      const { error: updErr } = await admin.auth.admin.updateUserById(u.id, {
-        user_metadata: { ...(u.user_metadata || {}), first_login: DESIRED },
-      })
+      const payload = {}
+      if (needsMetaChange) {
+        payload.user_metadata = { ...(u.user_metadata || {}), first_login: DESIRED }
+      }
+      if (willSetPass && newPass) {
+        payload.password = newPass
+      }
+
+      const { error: updErr } = await admin.auth.admin.updateUserById(u.id, payload)
       if (updErr) {
         errors++
         console.error(`✗ Error actualizando ${email}: ${updErr.message}`)
       } else {
         updated++
-        console.log(`✓ Actualizado ${email}: first_login ${String(current)} -> ${String(DESIRED)}`)
+        const parts = []
+        if (needsMetaChange) parts.push(`first_login -> ${String(DESIRED)}`)
+        if (willSetPass) parts.push('password SET')
+        console.log(`✓ ${email}: ${parts.join(' | ')}`)
       }
 
       await sleep(SLEEP_MS)
