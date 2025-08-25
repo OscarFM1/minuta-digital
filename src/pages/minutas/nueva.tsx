@@ -2,13 +2,18 @@
 /**
  * Crear nueva minuta (flujo Start/Stop):
  * - Muestra únicamente el formulario de creación.
- * - Al guardar correctamente, REDIRIGE al detalle /minutas/[id]
- *   donde se presentan los botones Start/Stop.
+ * - Al guardar correctamente, REDIRIGE al detalle /minutas/[id]#timer
+ *   para aterrizar en el bloque del cronómetro (botón Start).
  * - No renderiza ni resuelve uploader de evidencias aquí.
  *
  * Accesibilidad:
  * - Botón Volver con aria-label.
  * - Mensajes claros y minimalistas.
+ *
+ * Buenas prácticas:
+ * - Redirección con `router.replace` para evitar volver a la página de creación
+ *   al presionar "atrás" (UX más limpia).
+ * - Placeholder especializado para el título sin modificar MinuteForm internamente.
  */
 
 import { useEffect } from 'react'
@@ -76,13 +81,16 @@ export default function NuevaMinutaPage() {
 
         <h1 className={`${styles.newMinuteTitle} mb-3`}>Nueva minuta</h1>
 
-        {/* Únicamente el formulario; al crear redirige al detalle */}
+        {/* Únicamente el formulario; al crear redirige al detalle con #timer */}
         <section className={ui.card}>
           <MinuteForm
             mode="create"
             requireAttachmentOnCreate={false}  // no exigimos adjuntos en la creación
             enableAutosave={false}             // no aplica en create
-            onSaved={(m) => router.push(`/minutas/${m.id}`)} // ir al detalle para Start/Stop
+            onSaved={(m: { id: string }) => {
+              // ✅ Redirige al detalle aterrizando en el bloque del cronómetro (Start)
+              router.replace(`/minutas/${m.id}#timer`)
+            }}
           />
         </section>
       </div>

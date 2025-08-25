@@ -1,50 +1,90 @@
 /* src/styles/MinuteFormUser.module.css
-   - Aumenta contraste en labels/placeholders en tema oscuro.
-   - Mejora borde/hover/focus de textareas.
-   - Estilo visual para el campo bloqueado (tarea realizada).
+   - Contraste alto en tema oscuro.
+   - Mejora de focus/hover.
+   - Bloqueo visual del campo “Tarea realizada” y overrides seguros al habilitar.
 */
 
-/* === Scope local para no tocar otros formularios === */
+/* === Scope local (no tocar otros formularios) ============================== */
 .userFormScope :global(label),
 .userFormScope :global(.form-label),
 .userFormScope :global(legend),
 .userFormScope :global(label.text-muted),
 .userFormScope :global(.form-label.text-muted) {
-  color: #e5e7eb !important;   /* Slate-200, alto contraste */
-  opacity: 1 !important;       /* evita atenuación de 'text-muted' */
+  color: #e5e7eb !important;    /* Slate-200 */
+  opacity: 1 !important;
   font-weight: 600;
 }
 
-/* Área de texto */
-.userFormScope :global(textarea.form-control) {
-  background: #0b1324;         /* tu fondo oscuro actual */
-  color: #e5e7eb;              /* alto contraste */
+/* Área de texto (y también inputs por si cambian el tipo) */
+.userFormScope :global(textarea.form-control),
+.userFormScope :global(input.form-control) {
+  background: #0b1324;          /* fondo oscuro */
+  color: #e5e7eb;
   border: 1px solid rgba(255,255,255,0.12);
   border-radius: 12px;
 }
 
-.userFormScope :global(textarea.form-control::placeholder) {
-  color: #a1a1aa;              /* mejor visibilidad de placeholder */
+/* Placeholder legible */
+.userFormScope :global(textarea.form-control::placeholder),
+.userFormScope :global(input.form-control::placeholder) {
+  color: #a1a1aa;
   opacity: 1;
 }
 
-/* Enfasis al focus sin color estridente */
-.userFormScope :global(textarea.form-control:focus) {
+/* Enfasis al focus */
+.userFormScope :global(textarea.form-control:focus),
+.userFormScope :global(input.form-control:focus) {
   box-shadow: 0 0 0 0.2rem rgba(0,154,218,0.25); /* #009ada */
   border-color: #009ada;
   outline: none;
 }
 
-/* Campo "Tarea realizada" bloqueado (clase aplicada por LockTareaRealizada) */
-.userFormScope :global(.is-readonly-tarea) {
+/* ===== Estado BLOQUEADO (mientras NO hay end_time) ======================== */
+/* Si el componente Lock aplica clases/attrs, reforzamos: */
+.userFormScope :global(.is-readonly-tarea),
+.userFormScope :global(.form-control[readonly]),
+.userFormScope :global(.form-control[disabled]) {
   pointer-events: none;
+  user-select: none;
   opacity: .95;
   border-style: dashed;
   border-color: rgba(255,255,255,0.2);
+  background: #0b1324; /* mantiene esquema oscuro */
 }
 
-/* Tooltip/ayudas dentro del scope */
+/* Tooltips/ayudas */
 .userFormScope :global(.form-text),
 .userFormScope :global(.text-muted) {
-  color: #cbd5e1 !important;   /* Slate-300 */
+  color: #cbd5e1 !important;    /* Slate-300 */
+}
+
+/* ===== Overrides cuando se permite EDITAR “Tarea realizada” =============== */
+/* Se activa añadiendo la clase 'unlockTarea' en el wrapper (ya lo hace la página). */
+.unlockTarea textarea[name="tareaRealizada"],
+.unlockTarea textarea[name="tarea_realizada"],
+.unlockTarea input[name="tareaRealizada"],
+.unlockTarea input[name="tarea_realizada"] {
+  pointer-events: auto !important;
+  user-select: text !important;
+  opacity: 1 !important;
+  filter: none !important;
+  /* Si prefieres mantener el esquema oscuro, cambia a #0b1324 */
+  background: var(--bs-body-bg, #fff) !important;
+  color: inherit !important;
+  border-style: solid !important;
+}
+
+/* Elimina overlays/capas de bloqueo típicas */
+.unlockTarea #lock-tarea-realizada-overlay,
+.unlockTarea .tareaLock,
+.unlockTarea [data-lock="tareaRealizada"] {
+  display: none !important;
+}
+
+/* Si el wrapper bloqueado sigue con una clase específica, la neutralizamos */
+.unlockTarea :global(.is-readonly-tarea) {
+  pointer-events: auto !important;
+  user-select: text !important;
+  border-style: solid !important;
+  opacity: 1 !important;
 }

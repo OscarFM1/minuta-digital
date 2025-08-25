@@ -5,6 +5,10 @@
  * - Editar: "Tarea realizada" + Novedades (opcional)
  * - Start/Stop son la fuente de verdad para horas (no se editan aquí)
  * - Normaliza '' -> null antes de persistir
+ *
+ * Nuevas props:
+ * - ignoreTareaValidation?: boolean  -> desactiva la validación requerida del campo "tarea" (útil si editas con editor externo).
+ * - tareaMirrorValue?: string        -> espejo desde un editor externo para poblar el estado interno y pasar validaciones.
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -36,6 +40,11 @@ interface MinuteFormProps {
   autosaveDelayMs?: number
   /** Si algún día quisieras permitir novedades en create, actívalo */
   allowNovedadesInCreate?: boolean
+
+  /** ✅ NUEVO: desactiva el "required" de tarea_realizada (cuando usas editor externo) */
+  ignoreTareaValidation?: boolean
+  /** ✅ NUEVO: valor espejo desde editor externo para mantener el estado interno consistente */
+  tareaMirrorValue?: string
 }
 
 export default function MinuteForm({
@@ -48,6 +57,8 @@ export default function MinuteForm({
   enableAutosave,
   autosaveDelayMs = 800,
   allowNovedadesInCreate = false,
+  ignoreTareaValidation = false,
+  tareaMirrorValue,
 }: MinuteFormProps) {
   // Valores iniciales
   const init = useMemo<FormValues>(
@@ -77,12 +88,22 @@ export default function MinuteForm({
     setLastSaved(init)
   }, [init])
 
+  /** ✅ Mirror: si llega texto externo (editor propio), actualiza el estado interno */
+  useEffect(() => {
+    if (mode !== 'edit') return
+    if (typeof tareaMirrorValue !== 'string') return
+    if (tareaMirrorValue === values.tarea_realizada) return
+    setValues((prev) => ({ ...prev, tarea_realizada: tareaMirrorValue }))
+    // no tocamos lastSaved aquí; el autosave decidirá si persiste
+    // (y tu editor externo probablemente ya guardó también)
+  }, [tareaMirrorValue, mode, values.tarea_realizada])
+
   // -------- Helpers --------
   const isSame = (a: FormValues, b: FormValues) =>
     a.tarea_realizada === b.tarea_realizada && a.novedades === b.novedades
 
   const validateForSubmit = (): string | null => {
-    if (!values.tarea_realizada.trim())
+    if (!ignoreTareaValidation && !values.tarea_realizada.trim())
       return 'La "tarea" no puede estar vacía.'
     if (mode === 'create' && requireAttachmentOnCreate && files.length === 0) {
       return 'Debes adjuntar al menos un archivo como evidencia.'
@@ -211,6 +232,7 @@ export default function MinuteForm({
         </label>
         <textarea
           id="tarea"
+          name="tarea_realizada"     /* ✅ ahora el form tiene 'name' coherente */
           rows={6}
           placeholder={
             mode === 'create'
@@ -225,7 +247,8 @@ export default function MinuteForm({
             }))
           }
           className={ui.textarea}
-          required
+          /* ✅ usa validación interna según prop */
+          required={mode === 'create' ? true : !ignoreTareaValidation}
         />
       </div>
 
