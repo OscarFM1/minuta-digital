@@ -12,6 +12,7 @@
   "dependencies": {
     "@prisma/client": "^6.13.0",
     "@supabase/auth-helpers-nextjs": "^0.10.0",
+    "@supabase/supabase-js": "2.56.0",
     "bootstrap": "^5.3.7",
     "browser-image-compression": "^2.0.2",
     "dayjs": "^1.11.13",
@@ -27,7 +28,6 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",
-    "@supabase/supabase-js": "^2.56.0",
     "@types/node": "^20.19.10",
     "@types/react": "^19",
     "@types/react-dom": "^19",
