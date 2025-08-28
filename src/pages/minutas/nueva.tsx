@@ -1,13 +1,14 @@
 // src/pages/minutas/nueva.tsx
 /**
- * Crear nueva minuta (flujo Start/Stop) — SUBMIT CONTROLADO EN LA PÁGINA
+ * Crear nueva minuta (flujo Start/Stop) — SIN inputs de hora
  * ----------------------------------------------------------------------------
- * Cambios clave:
- * - Dejamos de delegar el submit a <MinuteForm/> para evitar que envíe
- *   `folio` o `folio_serial`. Esta página llama a createMinute(...) de
- *   src/lib/minutes.ts, que NO envía esos campos y maneja retry en 23505.
- * - Al guardar, redirige a /minutas/[id]#timer (aterriza en el cronómetro).
- * - UI minimal con Bootstrap; puedes reemplazar inputs por tus componentes.
+ * - Ya NO muestra "Hora inicio" ni "Hora fin".
+ * - Crea la minuta solo con fecha + descripción (y opcionales: tarea/novedades).
+ * - Tras guardar, redirige a /minutas/[id]#timer para usar exclusivamente Start/Stop.
+ *
+ * Seguridad/arquitectura:
+ * - Usa createMinute(...) de src/lib/minutes (NO envía folio/serial; retry 23505).
+ * - No renderiza adjuntos aquí; se manejan en el detalle.
  */
 
 import { useState } from 'react'
@@ -37,31 +38,26 @@ function toFriendlyMessage(err: unknown): string {
 export default function NuevaMinutaPage() {
   const router = useRouter()
 
-  // Estado del form controlado
+  // Estado del form (sin horas)
   const [date, setDate] = useState<string>(() => {
     const d = new Date()
     const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`)
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
   })
-  const [start, setStart] = useState<string>('')          // HH:mm (opcional)
-  const [end, setEnd] = useState<string>('')              // HH:mm (opcional)
   const [description, setDescription] = useState<string>('') // título/descr. principal
-  const [tarea, setTarea] = useState<string>('')          // opcional
-  const [novedades, setNovedades] = useState<string>('')  // opcional
+  const [tarea, setTarea] = useState<string>('')            // opcional
+  const [novedades, setNovedades] = useState<string>('')    // opcional
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // Guard por sesión básica (si no hay sesión, rebotamos al login)
   async function ensureSession() {
     const { data } = await supabase.auth.getUser()
-    if (!data?.user) {
-      router.replace('/login')
-      return false
-    }
+    if (!data?.user) { router.replace('/login'); return false }
     return true
   }
 
-  // Submit controlado — NO envía folio/folio_serial (los pone la BD con trigger)
+  // Submit controlado — SIN horas (las pone Start/Stop en el detalle)
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
@@ -73,8 +69,8 @@ export default function NuevaMinutaPage() {
 
       const row = await createMinute({
         date,
-        start_time: start || null,
-        end_time: end || null,
+        start_time: null,      // 👈 siempre null
+        end_time: null,        // 👈 siempre null
         description: description || null, // la API sólo la envía si existe la columna
         tarea_realizada: tarea || null,
         novedades: novedades || null,
@@ -112,12 +108,7 @@ export default function NuevaMinutaPage() {
         <Card className={ui.card}>
           <Card.Body>
             {error && (
-              <Alert
-                variant="danger"
-                onClose={() => setError(null)}
-                dismissible
-                className="mb-3"
-              >
+              <Alert variant="danger" onClose={() => setError(null)} dismissible className="mb-3">
                 {error}
               </Alert>
             )}
@@ -132,30 +123,6 @@ export default function NuevaMinutaPage() {
                       value={date}
                       onChange={(e) => setDate(e.target.value)}
                       required
-                    />
-                  </Form.Group>
-                </Col>
-
-                <Col md={4}>
-                  <Form.Group controlId="start_time">
-                    <Form.Label>Hora inicio</Form.Label>
-                    <Form.Control
-                      type="time"
-                      value={start}
-                      onChange={(e) => setStart(e.target.value)}
-                      placeholder="08:00"
-                    />
-                  </Form.Group>
-                </Col>
-
-                <Col md={4}>
-                  <Form.Group controlId="end_time">
-                    <Form.Label>Hora fin</Form.Label>
-                    <Form.Control
-                      type="time"
-                      value={end}
-                      onChange={(e) => setEnd(e.target.value)}
-                      placeholder="12:00"
                     />
                   </Form.Group>
                 </Col>
