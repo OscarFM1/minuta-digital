@@ -87,7 +87,7 @@ function useFocusTimerOnHash() {
     if (typeof window === 'undefined' || window.location.hash !== '#timer') return
     const t = window.setTimeout(() => {
       const root = document.getElementById('timer')
-      root?.scrollIntoView({ behavior: 'smooth', block: 'center' }); // <- ; necesario
+      root?.scrollIntoView({ behavior: 'smooth', block: 'center' })
       const startBtn = document.getElementById('timer-start-btn') as HTMLButtonElement | null
       startBtn?.focus()
     }, 60)
@@ -153,6 +153,19 @@ export default function MinuteDetailPage() {
   }, [minute?.id])
 
   useFocusTimerOnHash()
+
+  // 🚫 Fallback extra: deshabilitar/ocultar cualquier input[type="time"] dentro del form
+  useEffect(() => {
+    const scope = document.querySelector(`.${userUi.userFormScope}`)
+    if (!scope) return
+    scope.querySelectorAll('input[type="time"]').forEach((el) => {
+      const inp = el as HTMLInputElement
+      inp.disabled = true
+      inp.readOnly = true
+      inp.setAttribute('aria-hidden', 'true')
+      ;(inp.style as any).display = 'none'
+    })
+  }, [minute?.id])
 
   // Start/Stop
   const [opErr, setOpErr] = useState<string | null>(null)
@@ -312,7 +325,6 @@ export default function MinuteDetailPage() {
               )}
 
               {opErr && <Alert className="mt-2 mb-0" variant="danger">{opErr}</Alert>}
-              {/* Se eliminó el aviso "Ahora puedes completar tarea realizada" */}
             </Card.Body>
           </Card>
           {/* === FIN TIMER ===================================================== */}
@@ -356,8 +368,9 @@ export default function MinuteDetailPage() {
                   </Alert>
                 )}
 
-                {/* MinuteForm para el resto de campos (ocultamos su campo "tarea") */}
-                <div className="mm-hide-tarea">
+                {/* MinuteForm para el resto de campos
+                    (ocultamos su campo "tarea" y CUALQUIER input de hora) */}
+                <div className="mm-hide-tarea mm-hide-hours">
                   <MinuteForm
                     mode="edit"
                     minuteId={minute.id}
@@ -379,10 +392,22 @@ export default function MinuteDetailPage() {
                   />
                 </div>
 
-                {/* CSS local para ocultar el campo duplicado del MinuteForm */}
+                {/* CSS local para ocultar el campo duplicado del MinuteForm
+                   y cualquier input/label de hora */}
                 <style jsx>{`
+                  /* Oculta el campo "tarea" del MinuteForm */
                   .mm-hide-tarea :global(label[for="tarea"]),
                   .mm-hide-tarea :global(#tarea) {
+                    display: none !important;
+                  }
+
+                  /* 🚫 Oculta inputs de hora (start/end) que el MinuteForm pudiera renderizar */
+                  .mm-hide-hours :global(input[type="time"]) {
+                    display: none !important;
+                  }
+                  /* Oculta labels típicos de hora (tolerante a ids/for comunes) */
+                  .mm-hide-hours :global(label[for="start_time"]),
+                  .mm-hide-hours :global(label[for="end_time"]) {
                     display: none !important;
                   }
                 `}</style>
