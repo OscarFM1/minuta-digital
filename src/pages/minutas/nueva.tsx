@@ -4,26 +4,17 @@
  * ----------------------------------------------------------------------------
  * Cambios clave:
  * - Dejamos de delegar el submit a <MinuteForm/> para evitar que envíe
- *   `folio` o `folio_serial`. Ahora esta página llama a createMinute(...) de
- *   src/lib/minute.ts, que NO envía esos campos y maneja retry en 23505.
+ *   `folio` o `folio_serial`. Esta página llama a createMinute(...) de
+ *   src/lib/minutes.ts, que NO envía esos campos y maneja retry en 23505.
  * - Al guardar, redirige a /minutas/[id]#timer (aterriza en el cronómetro).
- * - UI minimal con Bootstrap; puedes reemplazar inputs por tus componentes
- *   si quieres mantener el look exacto.
- *
- * Accesibilidad:
- * - Botón Volver con aria-label.
- * - Mensajes claros y minimalistas.
- *
- * Buenas prácticas:
- * - router.replace para evitar volver a la página de creación con “Atrás”.
- * - Documentación exhaustiva en cada handler.
+ * - UI minimal con Bootstrap; puedes reemplazar inputs por tus componentes.
  */
 
 import { useState } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
 import { Form, Button, Card, Alert, Spinner, Row, Col } from 'react-bootstrap'
-import { createMinute } from '@/lib/minutes' // <- NUEVO: API controlada (sin folio/serial)
+import { createMinute } from '@/lib/minutes' // API controlada (sin folio/serial)
 import ui from '@/styles/NewMinute.module.css'
 import styles from '@/styles/Minutas.module.css'
 import { supabase } from '@/lib/supabaseClient'
@@ -52,16 +43,15 @@ export default function NuevaMinutaPage() {
     const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`)
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
   })
-  const [start, setStart] = useState<string>('')
-  const [end, setEnd] = useState<string>('')
+  const [start, setStart] = useState<string>('')          // HH:mm (opcional)
+  const [end, setEnd] = useState<string>('')              // HH:mm (opcional)
   const [description, setDescription] = useState<string>('') // título/descr. principal
-  const [tarea, setTarea] = useState<string>('')            // opcional
-  const [novedades, setNovedades] = useState<string>('')    // opcional
+  const [tarea, setTarea] = useState<string>('')          // opcional
+  const [novedades, setNovedades] = useState<string>('')  // opcional
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // Guard por sesión básica (si no hay sesión, rebotamos al login)
-  // Nota: si ya lo haces en _app o layout, puedes quitar este check.
   async function ensureSession() {
     const { data } = await supabase.auth.getUser()
     if (!data?.user) {

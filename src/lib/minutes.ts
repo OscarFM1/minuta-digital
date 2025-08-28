@@ -8,14 +8,13 @@
  * - Ser tolerante a esquemas (instancias con `user_id` o `created_by`).
  * - No romper si faltan columnas opcionales (description, created_by_*).
  *
- * Buenas prácticas aplicadas
- * - Insert idempotente con backoff corto (120ms) en 23505 (unique_violation).
- * - Nunca actualizamos `folio`/`folio_serial` ni columnas de dueño desde UI.
- * - Selects tipados y ordenados; helpers cacheados para introspección ligera.
+ * Buenas prácticas
+ * - Insert con backoff corto (120ms) cuando ocurre 23505 (unique_violation).
+ * - Nunca tocar `folio`/`folio_serial` ni columnas de dueño en UI.
+ * - Selects tipados y helpers cacheados para introspección ligera.
  *
- * NOTA: Esta API asume que en la BD ya existe el trigger que asigna folio:
- *   - Trigger BEFORE INSERT/UPDATE en public.minute (con advisory lock por user)
- *   - UNIQUE efectiva en (user_id, folio_serial)
+ * Requisitos en BD (ya existentes en prod):
+ * - Trigger que asigna folio/folio_serial (y UNIQUE efectiva por usuario).
  */
 
 import { supabase } from '@/lib/supabaseClient'
@@ -36,11 +35,25 @@ function isUniqueViolation(err: unknown): boolean {
 /** Backoff simple para reintento controlado. */
 function delay(ms: number) { return new Promise(res => setTimeout(res, ms)) }
 
+/** Borra claves con `undefined` (evita enviar basura en PATCH/INSERT). */
+function pruneUndefined<T extends Record<string, any>>(obj: T): T {
+  const out: any = {}
+  for (const k of Object.keys(obj)) if (obj[k] !== undefined) out[k] = obj[k]
+  return out
+}
+
 /** Limpia campos prohibidos antes de enviar a BD. */
 function sanitize<T extends Record<string, any>>(obj: T, forbidden: string[]): T {
   const clone: any = { ...obj }
   for (const k of forbidden) delete clone[k]
   return clone
+}
+
+/** Normaliza string vacío → null (para date/time/text opcionales). */
+function emptyToNull<T extends string | null | undefined>(v: T): string | null {
+  if (v === undefined || v === null) return null
+  const s = String(v).trim()
+  return s === '' ? null : s
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +94,9 @@ async function detectOwnerColumn(): Promise<'user_id' | 'created_by' | 'none'> {
 }
 
 // ---------------------------------------------------------------------------
+// Sesión/identidad
+// ---------------------------------------------------------------------------
+
 /** Usuario actual (id o error claro). */
 async function getCurrentUserId(): Promise<string> {
   const { data, error } = await supabase.auth.getUser()
@@ -128,10 +144,13 @@ async function insertMinuteWithOwner(base: Record<string, unknown>, userId: stri
   let lastErr: any = null
 
   for (const payload of candidates) {
+    // Limpia undefined antes de enviar
+    const clean = pruneUndefined(payload)
+
     // Intento 1
     let { data, error } = await supabase
       .from('minute')
-      .insert(payload)   // ❗️sin folio/serial
+      .insert(clean)      // ❗️sin folio/serial
       .select()
       .single()
 
@@ -145,10 +164,9 @@ async function insertMinuteWithOwner(base: Record<string, unknown>, userId: stri
     // Si es unique_violation (23505) reintenta 1 vez con backoff corto
     if (isUniqueViolation(error)) {
       await delay(120)
-      const second = await supabase.from('minute').insert(payload).select().single()
+      const second = await supabase.from('minute').insert(clean).select().single()
       if (!second.error) return second.data as Minute
       if (isUniqueViolation(second.error)) {
-        // Devolver error amable; la capa superior lo puede traducir si desea
         throw new Error('Conflicto temporal al asignar número de minuta. Intenta nuevamente.')
       }
       throw second.error
@@ -183,25 +201,24 @@ export async function createMinute(input: {
   const userId = await getCurrentUserId()
   const { name, email } = await getCurrentUserIdentity()
 
-  // Campos base (sin folio/serial)
+  // Campos base (sin folio/serial) — normalizamos vacíos a null
   const base: Record<string, unknown> = {
-    tarea_realizada: input.tarea_realizada ?? null,
-    novedades: input.novedades ?? null,
+    date: emptyToNull(input.date ?? null),
+    start_time: emptyToNull(input.start_time ?? null),
+    end_time: emptyToNull(input.end_time ?? null),
+    tarea_realizada: emptyToNull(input.tarea_realizada ?? null),
+    novedades: emptyToNull(input.novedades ?? null),
     is_protected: input.is_protected ?? false,
   }
-
-  // Opcionales de fecha/hora
-  if (input.date != null) base.date = input.date
-  if (input.start_time != null) base.start_time = input.start_time
-  if (input.end_time != null) base.end_time = input.end_time
 
   // Identidad (sólo si existen esas columnas)
   if (await hasColumn('created_by_name')) base.created_by_name = name
   if (await hasColumn('created_by_email')) base.created_by_email = email
 
   // description (si existe y viene dato)
-  if (input.description && (await hasDescriptionColumn())) {
-    base.description = input.description
+  const desc = emptyToNull(input.description ?? null)
+  if (desc && (await hasDescriptionColumn())) {
+    base.description = desc
   }
 
   const row = await insertMinuteWithOwner(base, userId)
@@ -226,7 +243,17 @@ export async function updateMinute(
     // ❌ NO permitir: folio, folio_serial, user_id, created_by
   }
 ): Promise<Minute> {
-  const safe = sanitize(patch as Record<string, any>, [
+  const normalized = pruneUndefined({
+    date: emptyToNull(patch.date ?? undefined as any),
+    start_time: emptyToNull(patch.start_time ?? undefined as any),
+    end_time: emptyToNull(patch.end_time ?? undefined as any),
+    tarea_realizada: emptyToNull(patch.tarea_realizada ?? undefined as any),
+    novedades: emptyToNull(patch.novedades ?? undefined as any),
+    is_protected: patch.is_protected,
+    description: emptyToNull(patch.description ?? undefined as any),
+  })
+
+  const safe = sanitize(normalized as Record<string, any>, [
     'folio',
     'folio_serial',
     'user_id',
@@ -234,7 +261,7 @@ export async function updateMinute(
   ])
 
   // Sólo incluir description si existe la columna
-  if (safe.description && !(await hasDescriptionColumn())) {
+  if ('description' in safe && safe.description && !(await hasDescriptionColumn())) {
     delete (safe as any).description
   }
 
