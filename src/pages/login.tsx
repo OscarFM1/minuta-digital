@@ -1,10 +1,25 @@
 // src/pages/login.tsx
+/**
+ * LOGIN — Flujo robusto sin "Verificando sesión…" infinito.
+ *
+ * Qué cambia:
+ *  - Usa el estado global de sesión vía useAuth() (provisto por AuthProvider).
+ *  - Si ya estás autenticado, redirige de inmediato (sin onAuthStateChange local).
+ *  - El submit hace signInWithPassword y deja que el AuthProvider actualice el estado.
+ *  - Respeta metadata first_login y el correo ADMIN para decidir destino.
+ *
+ * Requisitos:
+ *  - Tener configurado AuthProvider en _app.tsx.
+ *  - Proteger páginas privadas con <SessionGate requireAuth> (recomendado).
+ */
+
 import { useState, useEffect, useRef, ChangeEvent, FormEvent } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
 import Image from 'next/image'
 import { Card, Form, Button, Alert, Spinner } from 'react-bootstrap'
 import { supabase } from '@/lib/supabaseClient'
+import { useAuth } from '@/contexts/AuthContext'
 import styles from '@/styles/Login.module.css'
 
 const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
@@ -15,22 +30,17 @@ const isFirstLogin = (v: any) => v === true || v === 'true' || v === 1 || v === 
 
 export default function LoginPage() {
   const router = useRouter()
+  const { status, user } = useAuth() // <-- Estado global de sesión
   const [userOrEmail, setUserOrEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const redirecting = useRef(false) // previene que el loading quede colgado
+  const redirecting = useRef(false) // evita redirecciones múltiples
 
-  // Destino por defecto
+  // Destino por defecto (permite ?go=/ruta/privada)
   const computeGo = () =>
     typeof router.query.go === 'string' ? router.query.go : '/mis-minutas'
-
-  // Redirección robusta (navegación dura)
-  const hardRedirect = (url: string) => {
-    redirecting.current = true
-    window.location.replace(url)
-  }
 
   // 1) Mensaje informativo si viene de ruta protegida
   useEffect(() => {
@@ -39,43 +49,28 @@ export default function LoginPage() {
     }
   }, [router.query.unauthorized])
 
-  // 2) Si ya hay sesión al montar la página, redirige
+  // 2) Redirige en cuanto exista sesión validada por el AuthProvider
   useEffect(() => {
-    let alive = true
-    ;(async () => {
-      const { data } = await supabase.auth.getUser()
-      if (!alive) return
-      const user = data?.user
-      if (!user) return
-
+    if (redirecting.current) return
+    if (status === 'authenticated' && user) {
       const go = computeGo()
       const meta = user.user_metadata
-      if (isFirstLogin(meta?.first_login)) hardRedirect(`/cambiar-password?go=${encodeURIComponent(go)}`)
-      else if (user.email === ADMIN_EMAIL) hardRedirect('/minutas')
-      else hardRedirect(go)
-    })()
-    return () => { alive = false }
-  }, [router])
+      redirecting.current = true
 
-  // 3) Suscripción: cuando Supabase diga SIGNED_IN → redirige
-  useEffect(() => {
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (_event === 'SIGNED_IN' && session?.user && !redirecting.current) {
-        const go = computeGo()
-        const user = session.user
-        const meta = user.user_metadata
-        if (isFirstLogin(meta?.first_login)) hardRedirect(`/cambiar-password?go=${encodeURIComponent(go)}`)
-        else if (user.email === ADMIN_EMAIL) hardRedirect('/minutas')
-        else hardRedirect(go)
+      if (isFirstLogin(meta?.first_login)) {
+        router.replace(`/cambiar-password?go=${encodeURIComponent(go)}`)
+        return
       }
-      if (_event === 'SIGNED_OUT' && !redirecting.current) {
-        hardRedirect('/login')
+      if (user.email === ADMIN_EMAIL) {
+        router.replace('/minutas')
+        return
       }
-    })
-    return () => { sub.subscription.unsubscribe() }
-  }, []) // una sola vez
+      router.replace(go)
+    }
+    // Si 'unauthenticated', simplemente mostramos el formulario
+  }, [status, user, router])
 
-  // 4) Submit de login: solo disparamos signIn; la redirección la hace el listener
+  // 3) Submit de login: dispara signIn; el efecto de arriba hará la redirección
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError(null)
@@ -89,17 +84,34 @@ export default function LoginPage() {
 
       const { error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) throw error
-
-      // Fallback: si en 3s no redirigió (por cualquier motivo), liberamos loading
-      setTimeout(() => {
-        if (!redirecting.current) setLoading(false)
-      }, 3000)
+      // El AuthProvider actualizará 'status' y 'user' → useEffect redirige
     } catch (err: any) {
       setError(err?.message ?? 'No se pudo iniciar sesión')
       setLoading(false)
     }
   }
 
+  // 4) Si ya hay sesión, mostramos un feedback breve mientras redirige
+  if (status === 'authenticated') {
+    return (
+      <div className="d-flex flex-column align-items-center justify-content-center" style={{ minHeight: '60vh' }}>
+        <Spinner animation="border" />
+        <small className="mt-2 text-muted">Redirigiendo…</small>
+      </div>
+    )
+  }
+
+  // 5) Si el estado global está cargando (primera carga), evitamos parpadeo
+  if (status === 'loading') {
+    return (
+      <div className="d-flex flex-column align-items-center justify-content-center" style={{ minHeight: '60vh' }}>
+        <Spinner animation="border" />
+        <small className="mt-2 text-muted">Cargando…</small>
+      </div>
+    )
+  }
+
+  // 6) Estado no autenticado → mostrar formulario
   return (
     <>
       <Head><title>Iniciar Sesión – Minuta Digital</title></Head>
@@ -136,6 +148,7 @@ export default function LoginPage() {
                       setUserOrEmail(e.target.value)
                       if (error) setError(null)
                     }}
+                    autoComplete="username"
                     required
                   />
                 </Form.Group>
@@ -150,6 +163,8 @@ export default function LoginPage() {
                       setPassword(e.target.value)
                       if (error) setError(null)
                     }}
+                    autoComplete="current-password"
+                    minLength={8}
                     required
                   />
                 </Form.Group>
