@@ -50,3 +50,5 @@ npm-debug.log*
 .env.local
 .next/
 
+
+.env*
