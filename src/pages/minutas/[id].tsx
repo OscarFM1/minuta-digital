@@ -1,22 +1,20 @@
 // src/pages/minutas/[id].tsx
 /**
- * Detalle de minuta — Flujo cerrado con AuthProvider + SessionGate + SWR condicionado.
+ * Detalle de minuta — con Pause/Resume basado en intervalos.
  *
- * Reglas de negocio:
- * - ADMIN (operaciones@multi-impresos.com): solo lectura; evidencias en modo RO.
- * - USUARIO dueño: puede Start/Stop y editar “Tarea realizada” (debounce + lock).
+ * Reglas:
+ * - Start: crea intervalo activo (minute_interval). Si es el primero, fija start_time en minute.
+ * - Pause: cierra intervalo activo (ended_at = now()).
+ * - Resume: crea nuevo intervalo activo (igual que Start).
+ * - Stop: cierra intervalo activo (si lo hay) y fija end_time en minute.
  *
- * Decisiones técnicas:
- * - <SessionGate requireAuth> protege la ruta y muestra un loading robusto.
- * - useAuth() provee user/status; sin getUser() ni listeners locales.
- * - SWR solo dispara si status==='authenticated' y existe id.
- * - Start/Stop: actualiza times en BD y refresca con mutate().
- * - Tarea realizada: guarda a tarea_realizada/description con debounce; al guardar, bloquea.
+ * Cálculo de duración:
+ * - Suma (ended_at - started_at) de todos los intervalos (los abiertos suman hasta "ahora").
+ * - Muestra estados: Sin iniciar | En curso | En pausa | Finalizado.
  *
- * Requisitos previos:
- * - AuthProvider configurado en _app.tsx.
- * - SessionGate en src/components/SessionGate.tsx.
- * - RLS en BD que restrinja minuto/attachment por user_id y permita lectura al admin.
+ * Seguridad:
+ * - Solo el dueño ve los botones (admin = solo lectura).
+ * - RLS en BD (ver SQL de minute_interval).
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
@@ -24,7 +22,7 @@ import { useRouter } from 'next/router'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import { Container, Row, Col, Spinner, Alert, Card, Button, Badge } from 'react-bootstrap'
-import { FiHash, FiCalendar, FiClock, FiArrowLeft, FiPlay, FiSquare } from 'react-icons/fi'
+import { FiHash, FiCalendar, FiClock, FiArrowLeft, FiPlay, FiPause, FiRotateCw, FiSquare } from 'react-icons/fi'
 import { supabase } from '@/lib/supabaseClient'
 import { useAuth } from '@/contexts/AuthContext'
 import SessionGate from '@/components/SessionGate'
@@ -40,8 +38,8 @@ const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
 type MinuteRow = {
   id: string
   date?: string | null
-  start_time?: string | null // TIME
-  end_time?: string | null   // TIME
+  start_time?: string | null
+  end_time?: string | null
   tarea_realizada?: string | null
   novedades?: string | null
   description?: string | null
@@ -51,7 +49,14 @@ type MinuteRow = {
   folio_serial?: string | number | null
 }
 
-/* ==================== Utils tiempo ==================== */
+type IntervalRow = {
+  id: string
+  minute_id: string
+  started_at: string // ISO
+  ended_at: string | null // ISO | null
+}
+
+/* ==================== Utils ==================== */
 function toHHMM(value?: string | null): string {
   if (!value) return ''
   const s = String(value).trim()
@@ -61,22 +66,32 @@ function toHHMM(value?: string | null): string {
   return d.isValid() ? d.format('HH:mm') : ''
 }
 function nowAsPgTime(): string { return dayjs().format('HH:mm:ss') }
-function normalizePgTime(t?: string | null): string | null {
-  if (!t) return null
-  const s = String(t).trim()
-  if (/^\d{2}:\d{2}:\d{2}$/.test(s)) return s
-  if (/^\d{2}:\d{2}$/.test(s)) return `${s}:00`
-  const d = dayjs(s); return d.isValid() ? d.format('HH:mm:ss') : null
+
+function fmtDurationFromSeconds(totalSecs: number): string {
+  const secs = Math.max(0, Math.round(totalSecs))
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  const s = secs % 60
+  if (h > 0) return `${h}h ${m}m`
+  if (m > 0) return `${m}m`
+  return `${s}s`
 }
-function humanDiff(dateISO?: string | null, start?: string | null, end?: string | null): string {
-  const nS = normalizePgTime(start); if (!dateISO || !nS) return '—'
-  const nE = normalizePgTime(end)
-  const sDT = dayjs(`${dateISO}T${nS}`)
-  let eDT = nE ? dayjs(`${dateISO}T${nE}`) : dayjs()
-  if (eDT.isBefore(sDT)) eDT = eDT.add(1, 'day')
-  const mins = Math.max(0, eDT.diff(sDT, 'minute'))
-  const h = Math.floor(mins / 60), m = mins % 60
-  return h === 0 ? `${m}m` : `${h}h ${m}m`
+
+function tareaFrom(row?: MinuteRow | null): string {
+  if (!row) return ''
+  return (row.tarea_realizada ?? row.description ?? '') as string
+}
+
+/** Espeja al textarea interno del MinuteForm para pasar validaciones */
+function mirrorTareaToMinuteForm(text: string) {
+  const nodes = document.querySelectorAll<HTMLTextAreaElement>(
+    'textarea[name="tareaRealizada"], textarea[name="tarea_realizada"]'
+  )
+  nodes.forEach((el) => {
+    const proto = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
+    proto?.set?.call(el, text)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+  })
 }
 
 /* ==================== Data ==================== */
@@ -91,65 +106,65 @@ async function fetchMinuteById(_key: string, id: string): Promise<MinuteRow> {
   return row as unknown as MinuteRow
 }
 
-/* ==================== UX helpers ==================== */
-function useFocusTimerOnHash() {
-  useEffect(() => {
-    if (typeof window === 'undefined' || window.location.hash !== '#timer') return
-    const t = window.setTimeout(() => {
-      const root = document.getElementById('timer')
-      root?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      const startBtn = document.getElementById('timer-start-btn') as HTMLButtonElement | null
-      startBtn?.focus()
-    }, 60)
-    return () => window.clearTimeout(t)
-  }, [])
+async function fetchIntervals(_key: string, minuteId: string): Promise<IntervalRow[]> {
+  const { data, error } = await supabase
+    .from('minute_interval')
+    .select('id, minute_id, started_at, ended_at')
+    .eq('minute_id', minuteId)
+    .order('started_at', { ascending: true })
+  if (error) throw new Error(error.message)
+  return (data ?? []) as IntervalRow[]
 }
-function tareaFrom(row?: MinuteRow | null): string {
-  if (!row) return ''
-  return (row.tarea_realizada ?? row.description ?? '') as string
-}
-/** Espeja al textarea interno del MinuteForm para pasar validaciones */
-function mirrorTareaToMinuteForm(text: string) {
-  const nodes = document.querySelectorAll<HTMLTextAreaElement>(
-    'textarea[name="tareaRealizada"], textarea[name="tarea_realizada"]'
-  )
-  nodes.forEach((el) => {
-    const proto = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
-    proto?.set?.call(el, text)
-    el.dispatchEvent(new Event('input', { bubbles: true }))
-  })
+
+function sumIntervalsSeconds(intervals: IntervalRow[]): number {
+  return intervals.reduce((acc, it) => {
+    const start = dayjs(it.started_at)
+    const end = it.ended_at ? dayjs(it.ended_at) : dayjs()
+    const secs = Math.max(0, end.diff(start, 'second'))
+    return acc + secs
+  }, 0)
 }
 
 export default function MinuteDetailPage() {
   const router = useRouter()
   const { id } = router.query as { id?: string }
-
-  /** Estado global de auth (AuthProvider) */
   const { status, user } = useAuth()
   const userId = user?.id ?? null
   const isAdmin = user?.email === ADMIN_EMAIL
 
-  /** SWR: solo dispara si hay sesión lista y existe id */
-  const swrKey = id && status === 'authenticated' ? (['minute', id] as const) : null
-  const { data: minute, isLoading, error, mutate } = useSWR<MinuteRow>(
-    swrKey,
+  // Carga de minuta e intervalos (SWR condicionado por sesión y id)
+  const minuteKey = id && status === 'authenticated' ? (['minute', id] as const) : null
+  const { data: minute, isLoading: isMinuteLoading, error: minuteError, mutate: mutateMinute } = useSWR<MinuteRow>(
+    minuteKey,
     ([_tag, theId]) => fetchMinuteById(String(_tag), String(theId)),
     { revalidateOnFocus: false }
   )
 
-  /** Dueño: puede editar si NO es admin */
-  const isOwner = useMemo(
-    () => !!minute && !!userId && minute.user_id === userId,
-    [minute, userId]
+  const intervalsKey = id && status === 'authenticated' ? (['intervals', id] as const) : null
+  const { data: intervals, isLoading: isIntervalsLoading, error: intervalsError, mutate: mutateIntervals } = useSWR<IntervalRow[]>(
+    intervalsKey,
+    ([_tag, theId]) => fetchIntervals(String(_tag), String(theId)),
+    { revalidateOnFocus: true }
   )
 
+  // Estado derivado
+  const isOwner = useMemo(() => !!minute && !!userId && minute.user_id === userId, [minute, userId])
+  const hasStarted = useMemo(() => (intervals?.length ?? 0) > 0 || !!minute?.start_time, [intervals, minute?.start_time])
+  const hasEnded = useMemo(() => !!minute?.end_time, [minute?.end_time])
+  const activeInterval = useMemo(() => (intervals ?? []).find(it => it.ended_at === null) ?? null, [intervals])
+  const isRunning = useMemo(() => !!activeInterval && !hasEnded, [activeInterval, hasEnded])
+  const isPaused = useMemo(() => hasStarted && !isRunning && !hasEnded, [hasStarted, isRunning, hasEnded])
+
+  const totalSeconds = useMemo(() => sumIntervalsSeconds(intervals ?? []), [intervals])
+  const durationHuman = fmtDurationFromSeconds(totalSeconds)
+
+  // Tarea realizada (igual que antes)
   const tareaValueServer = useMemo(() => tareaFrom(minute), [minute])
   const [tareaText, setTareaText] = useState<string>('')
   const [saveState, setSaveState] = useState<'idle'|'saving'|'saved'|'error'>('idle')
   const saveTimer = useRef<number | null>(null)
-  const [tareaLocked, setTareaLocked] = useState(false) // bloquear tras guardar
+  const [tareaLocked, setTareaLocked] = useState(false)
 
-  // init editor al cambiar de minuta
   useEffect(() => {
     const initial = tareaValueServer ?? ''
     setTareaText(initial)
@@ -158,9 +173,7 @@ export default function MinuteDetailPage() {
     setTareaLocked(false)
   }, [minute?.id, tareaValueServer])
 
-  useFocusTimerOnHash()
-
-  // 🚫 Fallback extra: oculta inputs tipo "time" del MinuteForm (solo dueño)
+  // Fallback: ocultar inputs time del MinuteForm
   useEffect(() => {
     const scope = document.querySelector(`.${userUi.userFormScope}`)
     if (!scope) return
@@ -173,51 +186,101 @@ export default function MinuteDetailPage() {
     })
   }, [minute?.id])
 
-  // Start/Stop
+  // Acciones Start/Pause/Resume/Stop
   const [opErr, setOpErr] = useState<string | null>(null)
-  const [opLoading, setOpLoading] = useState<'start' | 'stop' | null>(null)
+  const [opLoading, setOpLoading] = useState<'start' | 'pause' | 'resume' | 'stop' | null>(null)
 
-  async function handleStart() {
-    if (!id || !isOwner || opLoading) return
-    setOpErr(null); setOpLoading('start')
+  async function doRefresh() {
+    await Promise.all([mutateIntervals(), mutateMinute()])
+  }
+
+  async function handleStartOrResume(kind: 'start' | 'resume') {
+    if (!id || !isOwner || hasEnded || opLoading) return
+    setOpErr(null); setOpLoading(kind)
     try {
-      const { error: updErr } = await supabase.from('minute')
-        .update({ start_time: nowAsPgTime(), end_time: null })
-        .eq('id', id)
-      if (updErr) throw updErr
-      await mutate()
+      // 1) Cierra cualquier duplicado “activo” izquierda (por seguridad)
+      await supabase
+        .from('minute_interval')
+        .update({ ended_at: new Date().toISOString() })
+        .eq('minute_id', id)
+        .is('ended_at', null)
+
+      // 2) Inserta intervalo activo
+      const ins = await supabase
+        .from('minute_interval')
+        .insert({ minute_id: id })
+        .select('id')
+        .single()
+
+      if (ins.error && ins.error.code !== '23505') throw ins.error
+      // 3) Si nunca tuvo start_time, lo fijamos (solo la primera vez)
+      if (!minute?.start_time) {
+        await supabase.from('minute')
+          .update({ start_time: nowAsPgTime(), end_time: null })
+          .eq('id', id)
+      }
+      await doRefresh()
     } catch (e: any) {
-      setOpErr(e?.message || 'No se pudo iniciar el tiempo.')
+      setOpErr(e?.message || 'No se pudo iniciar/reanudar.')
+    } finally {
+      setOpLoading(null)
+    }
+  }
+
+  async function handlePause() {
+    if (!id || !isOwner || !isRunning || opLoading) return
+    setOpErr(null); setOpLoading('pause')
+    try {
+      const { error } = await supabase
+        .from('minute_interval')
+        .update({ ended_at: new Date().toISOString() })
+        .eq('minute_id', id)
+        .is('ended_at', null)
+      if (error) throw error
+      await doRefresh()
+    } catch (e: any) {
+      setOpErr(e?.message || 'No se pudo pausar.')
     } finally {
       setOpLoading(null)
     }
   }
 
   async function handleStop() {
-    if (!id || !isOwner || opLoading) return
+    if (!id || !isOwner || hasEnded || opLoading) return
     setOpErr(null); setOpLoading('stop')
     try {
-      const { error: updErr } = await supabase.from('minute')
+      // 1) Cerrar intervalo activo si existe
+      await supabase
+        .from('minute_interval')
+        .update({ ended_at: new Date().toISOString() })
+        .eq('minute_id', id)
+        .is('ended_at', null)
+
+      // 2) Marcar end_time en minute (compatibilidad con tu UI/listas)
+      const { error: updErr } = await supabase
+        .from('minute')
         .update({ end_time: nowAsPgTime() })
         .eq('id', id)
       if (updErr) throw updErr
-      await mutate()
-      // focus al editor
+
+      await doRefresh()
+
+      // 3) Enfocar editor
       window.setTimeout(() => {
         const el = document.querySelector<HTMLElement>(
           'textarea[name="tareaRealizada"], textarea[name="tarea_realizada"]'
         )
         el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
         el?.focus()
-      }, 100)
+      }, 120)
     } catch (e: any) {
-      setOpErr(e?.message || 'No se pudo detener el tiempo.')
+      setOpErr(e?.message || 'No se pudo detener.')
     } finally {
       setOpLoading(null)
     }
   }
 
-  // guardar tarea (debounced)
+  // Guardado “tarea realizada” (debounce)
   async function persistTarea(text: string) {
     if (!id) return
     const { error } = await supabase
@@ -225,7 +288,7 @@ export default function MinuteDetailPage() {
       .update({ tarea_realizada: text, description: text })
       .eq('id', id)
     if (error) throw error
-    await mutate({ ...(minute as MinuteRow), tarea_realizada: text, description: text }, { revalidate: false })
+    await mutateMinute({ ...(minute as MinuteRow), tarea_realizada: text, description: text }, { revalidate: false })
   }
   function scheduleSave(text: string, delay = 800) {
     if (tareaLocked) return
@@ -255,11 +318,18 @@ export default function MinuteDetailPage() {
   }
   useEffect(() => () => { if (saveTimer.current) window.clearTimeout(saveTimer.current) }, [])
 
-  // Estados de render
+  // Render de estados iniciales/errores
   if (!id) {
     return (
       <SessionGate requireAuth>
         <Container className="py-4"><Alert variant="warning">ID de minuta no especificado.</Alert></Container>
+      </SessionGate>
+    )
+  }
+  if (minuteError || intervalsError) {
+    return (
+      <SessionGate requireAuth>
+        <Container className="py-4"><Alert variant="danger">No se pudo cargar la minuta: {String((minuteError as any)?.message || minuteError || intervalsError)}</Alert></Container>
       </SessionGate>
     )
   }
@@ -271,26 +341,24 @@ export default function MinuteDetailPage() {
   })
   const dateStr = minute?.date ? dayjs(minute.date).format('DD/MM/YYYY') : '—'
   const timeStr = `${toHHMM(minute?.start_time) || '—'} — ${toHHMM(minute?.end_time) || '—'}`
-  const durStr = humanDiff(minute?.date ?? null, minute?.start_time, minute?.end_time)
 
   const showOwnerEdit = !!minute && isOwner && !isAdmin
   const canEditTarea = showOwnerEdit && !!minute?.end_time && !tareaLocked
 
+  const statusBadge = hasEnded
+    ? { text: 'Finalizado', variant: 'secondary' as const }
+    : isRunning
+      ? { text: 'En curso', variant: 'warning' as const }
+      : hasStarted
+        ? { text: 'En pausa', variant: 'info' as const }
+        : { text: 'Sin iniciar', variant: 'secondary' as const }
+
   return (
     <SessionGate requireAuth>
       <Container className={ui.wrapper}>
-        {/* Cargando/errores de datos */}
-        {status === 'loading' && (
-          <div className="py-5 d-flex align-items-center gap-2"><Spinner animation="border" size="sm" /><span>Cargando…</span></div>
-        )}
-        {swrKey && isLoading && (
-          <div className="py-5 d-flex align-items-center gap-2"><Spinner animation="border" size="sm" /><span>Cargando minuta…</span></div>
-        )}
-        {error && (
-          <div className="py-4"><Alert variant="danger">No se pudo cargar la minuta: {String((error as any)?.message || error)}</Alert></div>
-        )}
-        {swrKey && !isLoading && !error && !minute && (
-          <div className="py-4"><Alert variant="secondary">Minuta no encontrada.</Alert></div>
+        {/* Loading simple mientras llega todo */}
+        {(status === 'loading' || isMinuteLoading || isIntervalsLoading) && (
+          <div className="py-4 d-flex align-items-center gap-2"><Spinner animation="border" size="sm" /><span>Cargando…</span></div>
         )}
 
         {minute && (
@@ -323,25 +391,38 @@ export default function MinuteDetailPage() {
                 <Card className={ui.card} id="timer" aria-label="Cronómetro">
                   <Card.Header className={ui.cardHeader}>
                     <span>Tiempo</span>
-                    <Badge bg={minute.start_time && !minute.end_time ? 'warning' : 'secondary'} className={ui.badgePill}>
-                      {minute.start_time ? (minute.end_time ? 'Finalizado' : 'En curso') : 'Sin iniciar'}
+                    <Badge bg={statusBadge.variant} className={ui.badgePill}>
+                      {statusBadge.text}
                     </Badge>
                   </Card.Header>
                   <Card.Body className="d-flex flex-column gap-2">
                     <div className="d-flex align-items-center gap-3">
-                      <div><FiClock /> <strong>Duración:</strong> {durStr}</div>
+                      <div><FiClock /> <strong>Duración:</strong> {durationHuman}</div>
                       <div className="text-muted small">({timeStr})</div>
                     </div>
 
-                    {/* ⏯️ Controles Start/Stop (solo dueño) */}
+                    {/* Controles del tiempo */}
                     {showOwnerEdit ? (
-                      <div className="d-flex gap-2">
-                        {!minute.start_time && (
-                          <Button id="timer-start-btn" variant="success" onClick={handleStart} disabled={opLoading !== null}>
+                      <div className="d-flex flex-wrap gap-2">
+                        {!hasStarted && !hasEnded && (
+                          <Button id="timer-start-btn" variant="success" onClick={() => handleStartOrResume('start')} disabled={opLoading !== null}>
                             {opLoading === 'start' ? <Spinner animation="border" size="sm" /> : <><FiPlay /> Start</>}
                           </Button>
                         )}
-                        {!!minute.start_time && !minute.end_time && (
+
+                        {isRunning && !hasEnded && (
+                          <Button variant="warning" onClick={handlePause} disabled={opLoading !== null}>
+                            {opLoading === 'pause' ? <Spinner animation="border" size="sm" /> : <><FiPause /> Pause</>}
+                          </Button>
+                        )}
+
+                        {isPaused && !hasEnded && (
+                          <Button variant="success" onClick={() => handleStartOrResume('resume')} disabled={opLoading !== null}>
+                            {opLoading === 'resume' ? <Spinner animation="border" size="sm" /> : <><FiRotateCw /> Resume</>}
+                          </Button>
+                        )}
+
+                        {hasStarted && !hasEnded && (
                           <Button variant="danger" onClick={handleStop} disabled={opLoading !== null}>
                             {opLoading === 'stop' ? <Spinner animation="border" size="sm" /> : <><FiSquare /> Stop</>}
                           </Button>
@@ -367,7 +448,7 @@ export default function MinuteDetailPage() {
                       {/* Lock visual del campo interno */}
                       <LockTareaRealizada />
 
-                      {/* ✅ Editor propio (único visible) */}
+                      {/* Editor propio (mínimo ruido; bloqueo tras guardar final) */}
                       {(!tareaLocked && !!minute.end_time) && (
                         <div className="mb-3">
                           <label className="form-label">Tarea realizada</label>
@@ -395,7 +476,7 @@ export default function MinuteDetailPage() {
                         </Alert>
                       )}
 
-                      {/* MinuteForm para el resto de campos (oculta tarea/horas) */}
+                      {/* MinuteForm para resto de campos (oculto tarea/horas) */}
                       <div className="mm-hide-tarea mm-hide-hours">
                         <MinuteForm
                           mode="edit"
@@ -413,27 +494,18 @@ export default function MinuteDetailPage() {
                           onSaved={async () => {
                             setTareaLocked(true)
                             try { await supabase.from('minute').update({ tarea_cerrada: true }).eq('id', minute.id) } catch {}
-                            await mutate(undefined, { revalidate: true })
+                            await mutateMinute(undefined, { revalidate: true })
                           }}
                         />
                       </div>
 
                       {/* CSS local para ocultar el campo duplicado del MinuteForm y horas */}
                       <style jsx>{`
-                        /* Oculta el campo "tarea" del MinuteForm */
                         .mm-hide-tarea :global(label[for="tarea"]),
-                        .mm-hide-tarea :global(#tarea) {
-                          display: none !important;
-                        }
-
-                        /* 🚫 Oculta inputs de hora (start/end) que el MinuteForm pudiera renderizar */
-                        .mm-hide-hours :global(input[type="time"]) {
-                          display: none !important;
-                        }
+                        .mm-hide-tarea :global(#tarea) { display: none !important; }
+                        .mm-hide-hours :global(input[type="time"]) { display: none !important; }
                         .mm-hide-hours :global(label[for="start_time"]),
-                        .mm-hide-hours :global(label[for="end_time"]) {
-                          display: none !important;
-                        }
+                        .mm-hide-hours :global(label[for="end_time"]) { display: none !important; }
                       `}</style>
                     </Card.Body>
                   ) : (
@@ -444,7 +516,7 @@ export default function MinuteDetailPage() {
                         <div className={ui.k}>Tarea realizada</div>
                         <div className={ui.v}>{tareaValueServer || <span className={ui.muted}>—</span>}</div>
                         <div className={ui.k}>Novedades</div>
-                        <div className={ui.v}>{minute.novedades || <span className={ui.muted}>—</span>}</div>
+                        <div className={ui.v}>{minute?.novedades || <span className={ui.muted}>—</span>}</div>
                       </div>
                     </Card.Body>
                   )}
