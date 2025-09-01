@@ -6,16 +6,21 @@
  *  - Evitar cuelgues tipo “Verificando sesión…” y fetch prematuros.
  *  - Usar un ÚNICO estado de auth (AuthProvider) y proteger vía <SessionGate>.
  *  - Disparar SWR SOLO cuando status==='authenticated' y existe user.id.
+ *  - Calcular totales reales (minutos) DESCONTANDO pausas vía RPC minute_totals_for.
  *
  * Claves técnicas:
  *  - <SessionGate requireAuth> maneja 'loading' y redirección a /login.
  *  - if (user.email === ADMIN_EMAIL) → redirige a /minutas (rol admin solo lectura global).
  *  - Realtime: canal postgres_changes limitado a las minutas del usuario.
- *  - Navegación a crear/ver con anchors reales (as="a") para robustez.
+ *  - Totales: SWR adicional que llama a supabase.rpc('minute_totals_for', { minute_ids })
+ *             y cae a un fallback end-start si la RPC aún no está disponible.
  *
  * Requisitos:
  *  - Tener AuthProvider en _app.tsx.
  *  - Tener SessionGate en src/components/SessionGate.tsx.
+ *  - Haber creado la función RPC SQL:
+ *      create or replace function public.minute_totals_for(minute_ids uuid[])
+ *      returns table(minute_id uuid, total_seconds bigint) ...
  */
 
 import React, { useEffect, useMemo, useState } from 'react'
@@ -74,6 +79,7 @@ const fetchMyMinutes = async (filters: Filters, userId: string): Promise<MinuteC
       attachment(count)
     `)
     .eq('user_id', userId)
+
   // Ordenación estable: por fecha, luego por hora de inicio
   query = query.order('date', { ascending: false }).order('start_time', { ascending: false })
 
@@ -123,17 +129,37 @@ export default function MisMinutasPage() {
     { revalidateOnFocus: true }
   )
 
-  // Realtime (solo cuando hay user.id definitivo)
+  // === Totales (DESCARTA pausas) via RPC ====================================
+  // Tomamos IDs de las minutas cargadas para pedir sus totales en segundos
+  const minuteIds = useMemo(() => (items ?? []).map(m => m.id), [items])
+
+  type TotalsRow = { minute_id: string; total_seconds: number }
+
+  const { data: totals, mutate: mutateTotals } = useSWR<TotalsRow[]>(
+    minuteIds.length > 0 ? ['minute-totals', minuteIds.join(',')] : null,
+    async () => {
+      const { data, error } = await supabase.rpc('minute_totals_for', { minute_ids: minuteIds })
+      if (error) {
+        // No rompemos la UI; caemos a fallback end-start
+        console.warn('RPC minute_totals_for error:', error.message)
+        return []
+      }
+      return data ?? []
+    },
+    { revalidateOnFocus: true }
+  )
+
+  // Realtime (solo cuando hay user.id definitivo) → refresca listado y totales
   useEffect(() => {
     if (status !== 'authenticated' || !user?.id) return
     const ch = supabase
       .channel('minute-self')
       .on('postgres_changes',
         { event: '*', schema: 'public', table: 'minute', filter: `user_id=eq.${user.id}` },
-        () => { mutate() })
+        () => { mutate(); mutateTotals() })
       .subscribe()
     return () => { supabase.removeChannel(ch) }
-  }, [status, user?.id, mutate])
+  }, [status, user?.id, mutate, mutateTotals])
 
   // Estados de eliminación (el botón está oculto; dejamos compatibilidad)
   const [showDelete, setShowDelete] = useState(false)
@@ -167,7 +193,7 @@ export default function MisMinutasPage() {
       await deleteMinuteCascade(toDeleteId)
       setShowDelete(false); setToDeleteId(null)
       setFeedback('Minuta eliminada correctamente.')
-      await mutate()
+      await mutate(); await mutateTotals()
     } catch (e: any) {
       console.error('DELETE error', e)
       const msg = e?.message || e?.error_description || 'No se pudo eliminar la minuta.'
@@ -187,18 +213,30 @@ export default function MisMinutasPage() {
     }
   }
 
-  // Métricas en client (estimadas por HH:MM a minutos)
+  // === Métricas: usa RPC (si disponible) y fallback end-start =================
   const stats = useMemo(() => {
     if (!items || items.length === 0) return { count: 0, minutes: 0, attachments: 0 }
-    const minutes = items.reduce((acc, r) => {
+
+    // Mapear totales por id (si la RPC ya respondió)
+    const byId = new Map<string, number>()
+    ;(totals ?? []).forEach(t => byId.set(t.minute_id, t.total_seconds || 0))
+
+    // Sumar segundos trabajados para todas las minutas en pantalla
+    const totalSeconds = items.reduce((acc, r) => {
+      const fromRpc = byId.get(r.id)
+      if (typeof fromRpc === 'number') return acc + fromRpc
+
+      // Fallback: si no hay RPC, usa diferencia end-start (no descuenta pausas)
       if (!r.start_time || !r.end_time) return acc
       const start = new Date(`1970-01-01T${r.start_time}`)
       const end = new Date(`1970-01-01T${r.end_time}`)
-      return acc + Math.max(0, (end.getTime() - start.getTime()) / 60000)
+      const secs = Math.max(0, (end.getTime() - start.getTime()) / 1000)
+      return acc + secs
     }, 0)
+
     const attachments = items.reduce((a, r) => a + (r.adjuntos ?? 0), 0)
-    return { count: items.length, minutes: Math.round(minutes), attachments }
-  }, [items])
+    return { count: items.length, minutes: Math.round(totalSeconds / 60), attachments }
+  }, [items, totals])
 
   return (
     <SessionGate requireAuth>
