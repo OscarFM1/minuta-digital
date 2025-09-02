@@ -2,13 +2,18 @@
 /**
  * Estadísticas mensuales (ADMIN) + Exportación CSV/XLSX con gráficos (imágenes).
  * 🔒 Protegida por rol: admin | super_admin (RequireRole)
- *   - Se eliminó el guard de email (ADMIN_EMAIL) y el useEffect de verificación manual.
- *   - Si el usuario tiene must_change_password=true, <RequireRole> redirige a /cambiar-password.
- *   - Si no tiene rol permitido, <RequireRole> redirige a /403 (o /login según tu componente).
+ * - Se elimina cualquier guard por email; usamos gating por rol y RLS.
+ * - Excluye del conteo a usuarios de PRUEBAS (config por ENV).
  *
- * Buenas prácticas:
- * - El acceso se aplica en UI y BD (RLS ya permite SELECT global a admin/super_admin).
- * - Mantén este gating también en cualquier API /api/stats/* que consuma este dashboard.
+ * ENV relevantes:
+ * - NEXT_PUBLIC_LOGIN_DOMAIN: dominio de login local (por defecto 'login.local').
+ * - NEXT_PUBLIC_STATS_EXCLUDE_EMAILS: lista coma-separada de emails a EXCLUIR de estadísticas
+ *     EJ: "pruebas@login.local,qa1@login.local"
+ * - NEXT_PUBLIC_STATS_EXTRA_EMAILS: correos extra a incluir en tablero (además de los oficiales).
+ *
+ * Defensa en profundidad:
+ * - Filtro en BD: .in('created_by_email', ALLOWED_EMAILS) + .neq(...) por cada EXCLUIDO
+ * - Filtro en cliente: sanity-check para asegurar que excluidos no cuenten aunque cambie ALLOWED_EMAILS.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -96,35 +101,42 @@ const PALETTE = {
 const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
 
 /* ============================================================================
- * Lista blanca de correos para incluir en el tablero de estadísticas
- * - Incluye el worker de QA por defecto: pruebas@login.local
- * - Permite sumar correos extra por ENV: NEXT_PUBLIC_STATS_EXTRA_EMAILS="a@x.com,b@y.com"
+ * Lista de usuarios "oficiales" a mostrar en el tablero
+ *  ⚠️ NO incluimos al usuario de PRUEBAS aquí (se excluye abajo por ENV).
+ *  Puedes mantener esta lista estática y sumar adicionales por ENV si hace falta.
  * ==========================================================================*/
-const TEST_WORKER =
-  (process.env.NEXT_PUBLIC_TEST_WORKER_EMAIL || 'pruebas@login.local').toLowerCase()
-const EXTRA_ALLOWED =
-  (process.env.NEXT_PUBLIC_STATS_EXTRA_EMAILS || '')
-    .split(',')
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean)
-
-// ---------------- Config negocio ----------------
 const USERS = [
   { username: 'kat.acosta',   name: 'Katherine.A' },
   { username: 'ivan.zamudio', name: 'Iván Zamudio' },
   { username: 'audia.mesa',   name: 'Audia Mesa' },
   { username: 'juan.diaz',    name: 'Juan Díaz' },
   { username: 'kat.blades',   name: 'Katherine.B' },
-  // 👇 añadimos explícitamente el worker de pruebas como usuario visible
-  { username: 'pruebas',      name: 'Tester (QA)' },
 ].map(u => ({ ...u, email: `${u.username}@${LOGIN_DOMAIN}`.toLowerCase() }))
 
-// Lista final (única) para las consultas
-const ALLOWED_EMAILS = Array.from(new Set([
-  ...USERS.map(u => u.email),
-  TEST_WORKER,
-  ...EXTRA_ALLOWED,
-]))
+/** Emails extra a incluir (por si agregas más staff sin tocar código) */
+const EXTRA_ALLOWED = Array.from(
+  new Set(
+    (process.env.NEXT_PUBLIC_STATS_EXTRA_EMAILS || '')
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean)
+  )
+)
+
+/** Emails a EXCLUIR del tablero (por defecto, el tester) */
+const STATS_EXCLUDE_EMAILS = Array.from(
+  new Set(
+    (process.env.NEXT_PUBLIC_STATS_EXCLUDE_EMAILS || 'pruebas@login.local')
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean)
+  )
+)
+
+/** Lista final de correos permitidos en consulta (sin los excluidos) */
+const ALLOWED_EMAILS = Array.from(
+  new Set([...USERS.map(u => u.email), ...EXTRA_ALLOWED])
+).filter(e => !STATS_EXCLUDE_EMAILS.includes(e))
 
 const LUNCH_MIN = 60
 const BREAK_MIN = 20
@@ -281,13 +293,19 @@ export default function AdminEstadisticasPage() {
   const chartDailyRef = useRef<HTMLDivElement | null>(null)
   const donutRef = useRef<HTMLDivElement | null>(null)
 
-  // Fetch mensual SOLO de los usuarios de la lista blanca (USERS + QA/env)
+  // Fetch mensual SOLO de la lista blanca y excluyendo testers
   useEffect(() => {
     setLoading(true)
     setError(null)
     ;(async () => {
       try {
-        const { data, error } = await supabase
+        // ⚠️ Si por algún motivo la lista queda vacía, no hagas query abierta
+        if (ALLOWED_EMAILS.length === 0) {
+          setRows([])
+          return
+        }
+
+        let q = supabase
           .from('minute')
           .select('user_id, created_by_email, created_by_name, date, start_time, end_time')
           .gte('date', startISO)
@@ -295,8 +313,22 @@ export default function AdminEstadisticasPage() {
           .in('created_by_email', ALLOWED_EMAILS)
           .order('date', { ascending: true })
           .order('start_time', { ascending: true })
+
+        // Exclusión explícita (por si EXTRA_ALLOWED trae un tester por error)
+        for (const ex of STATS_EXCLUDE_EMAILS) {
+          q = q.neq('created_by_email', ex)
+        }
+
+        const { data, error } = await q
         if (error) throw error
-        setRows((data ?? []) as MinuteRow[])
+
+        // Filtro defensivo en cliente (case-insensitive)
+        const rowsSafe = (data ?? []).filter(r => {
+          const mail = (r?.created_by_email || '').toLowerCase()
+          return ALLOWED_EMAILS.includes(mail) && !STATS_EXCLUDE_EMAILS.includes(mail)
+        })
+
+        setRows(rowsSafe as MinuteRow[])
       } catch (e: any) {
         setError(e?.message ?? 'No se pudieron cargar las minutas.')
       } finally {
@@ -305,7 +337,7 @@ export default function AdminEstadisticasPage() {
     })()
   }, [startISO, endISO])
 
-  // Agregación por usuario
+  // Agregación por usuario (solo los oficiales en USERS)
   const dataByUser: UserAgg[] = useMemo(() => {
     const base: Record<string, UserAgg> = {}
     for (const u of USERS) {
@@ -321,7 +353,8 @@ export default function AdminEstadisticasPage() {
 
     for (const r of rows) {
       const email = (r.created_by_email ?? '').toLowerCase()
-      if (!email || !(email in base)) continue
+      if (!email || !(email in base)) continue // Ignora todo lo que no está en USERS (incluye testers)
+      if (STATS_EXCLUDE_EMAILS.includes(email)) continue // defensa extra (no debería entrar por filtros)
 
       const date = r.date ?? ''
       if (!date) continue
