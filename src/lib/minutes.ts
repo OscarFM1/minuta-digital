@@ -461,3 +461,89 @@ export async function deleteMinute(
 
   return { minuteId, attachmentsFound, storageRemoved, attachmentsDeleted }
 }
+
+// ---------------------------------------------------------------------------
+// Resolución del "creador" de la minuta (ADMIN-friendly)
+// ---------------------------------------------------------------------------
+
+/**
+ * Busca nombre/email del usuario en la tabla de perfiles.
+ * - Intenta primero 'profiles' y luego 'profile' (tolerante a esquemas).
+ * - Devuelve el mejor display name disponible o nulls si no hay datos.
+ */
+async function getProfileNameEmail(userId: string): Promise<{ name: string | null; email: string | null }> {
+  // 1) Intento en 'profiles'
+  let { data, error } = await supabase
+    .from('profiles')
+    .select('full_name, name, display_name, email')
+    .eq('id', userId)
+    .limit(1)
+    .single()
+
+  if (!error && data) {
+    const name = (data.full_name || data.name || data.display_name || null) as string | null
+    const email = (data.email || null) as string | null
+    return { name, email }
+  }
+
+  // 2) Intento alterno en 'profile'
+  const alt = await supabase
+    .from('profile')
+    .select('full_name, name, display_name, email')
+    .eq('id', userId)
+    .limit(1)
+    .single()
+
+  if (!alt.error && alt.data) {
+    const name = (alt.data.full_name || alt.data.name || alt.data.display_name || null) as string | null
+    const email = (alt.data.email || null) as string | null
+    return { name, email }
+  }
+
+  return { name: null, email: null }
+}
+
+/**
+ * Resuelve el string a mostrar para "Creador" a partir de una fila de minute.
+ * Prioriza:
+ *   1) created_by_name
+ *   2) created_by_email
+ *   3) (fallback) lookup en profiles usando la columna de dueño (user_id/created_by)
+ */
+export async function resolveCreatorDisplay(minuteRow: {
+  created_by_name?: string | null
+  created_by_email?: string | null
+  user_id?: string | null
+  created_by?: string | null
+}): Promise<string | null> {
+  const byName = (minuteRow.created_by_name || '').trim()
+  if (byName) return byName
+
+  const byEmail = (minuteRow.created_by_email || '').trim()
+  if (byEmail) return byEmail
+
+  // Fallback: detectar columna de dueño y consultar profiles
+  const ownerCol = await detectOwnerColumn()
+  const ownerId =
+    ownerCol === 'user_id' ? minuteRow.user_id
+    : ownerCol === 'created_by' ? minuteRow.created_by
+    : null
+
+  if (!ownerId) return null
+
+  const { name, email } = await getProfileNameEmail(ownerId)
+  return (name && name.trim()) || email || null
+}
+
+/**
+ * Carga una minuta por id y adjunta `creator_display` ya resuelto para UI admin.
+ * No altera el contrato de Minute; agrega un campo derivado.
+ */
+export type MinuteWithCreator = Minute & { creator_display: string | null }
+
+export async function getMinuteByIdWithCreator(id: string): Promise<MinuteWithCreator | null> {
+  const row = await getMinuteById(id) // usa tu export existente
+  if (!row) return null
+  const creator_display = await resolveCreatorDisplay(row as any)
+  return { ...(row as any), creator_display }
+}
