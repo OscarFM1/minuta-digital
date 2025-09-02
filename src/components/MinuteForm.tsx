@@ -4,11 +4,14 @@
  * - Crear: "Título de tarea" + "Tarea a realizar" (sin Novedades)
  * - Editar: "Tarea realizada" + Novedades (opcional)
  * - Start/Stop son la fuente de verdad para horas (no se editan aquí)
- * - Normaliza '' -> null antes de persistir
+ * - Normaliza '' -> null/undefined antes de persistir
  *
  * Nuevas props:
- * - ignoreTareaValidation?: boolean  -> desactiva la validación requerida del campo "tarea" (útil si editas con editor externo).
+ * - ignoreTareaValidation?: boolean  -> desactiva la validación requerida del campo "tarea".
  * - tareaMirrorValue?: string        -> espejo desde un editor externo para poblar el estado interno y pasar validaciones.
+ *
+ * ⚠️ Workers: al crear solo pueden crear la minuta y adjuntar evidencias.
+ *   No hay edición de tiempos ni asignación manual de fechas en este form.
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -46,6 +49,9 @@ interface MinuteFormProps {
   /** ✅ NUEVO: valor espejo desde editor externo para mantener el estado interno consistente */
   tareaMirrorValue?: string
 }
+
+/** Util: hoy en YYYY-MM-DD (para que date NUNCA sea null en inserts) */
+const todayISO = () => new Date().toISOString().slice(0, 10)
 
 export default function MinuteForm({
   mode,
@@ -94,8 +100,6 @@ export default function MinuteForm({
     if (typeof tareaMirrorValue !== 'string') return
     if (tareaMirrorValue === values.tarea_realizada) return
     setValues((prev) => ({ ...prev, tarea_realizada: tareaMirrorValue }))
-    // no tocamos lastSaved aquí; el autosave decidirá si persiste
-    // (y tu editor externo probablemente ya guardó también)
   }, [tareaMirrorValue, mode, values.tarea_realizada])
 
   // -------- Helpers --------
@@ -123,10 +127,13 @@ export default function MinuteForm({
       try {
         setAutoStatus('saving')
         const updated = await updateMinute(minuteId, {
-          tarea_realizada: snapshot.tarea_realizada,
-          novedades: snapshot.novedades.trim() ? snapshot.novedades : null,
+          tarea_realizada: snapshot.tarea_realizada.trim(),
+          novedades: snapshot.novedades.trim() ? snapshot.novedades.trim() : null,
         })
-        setLastSaved(snapshot)
+        setLastSaved({
+          tarea_realizada: snapshot.tarea_realizada,
+          novedades: snapshot.novedades,
+        })
         setAutoStatus('saved')
         onSaved?.(updated)
         setTimeout(() => setAutoStatus('idle'), 1200)
@@ -157,12 +164,16 @@ export default function MinuteForm({
     try {
       if (mode === 'create') {
         // Novedades se completan luego del Stop; aquí van como null
+        // ✅ Siempre enviamos date = hoy para evitar NOT NULL en BD
         const created = await createMinute({
-          tarea_realizada: values.tarea_realizada,
+          date: todayISO(),
+          tarea_realizada: values.tarea_realizada.trim(),
           description: title.trim() ? title.trim() : undefined,
           novedades: null,
+          // start_time / end_time se manejan por Start/Stop fuera del form
         })
 
+        // Adjuntos opcionales al crear
         if (files.length > 0) {
           const paths: string[] = []
           for (const f of files) {
@@ -175,8 +186,8 @@ export default function MinuteForm({
         onSaved?.(created)
       } else if (mode === 'edit' && minuteId) {
         const updated = await updateMinute(minuteId, {
-          tarea_realizada: values.tarea_realizada,
-          novedades: values.novedades.trim() ? values.novedades : null,
+          tarea_realizada: values.tarea_realizada.trim(),
+          novedades: values.novedades.trim() ? values.novedades.trim() : null,
         })
         setLastSaved(values)
         onSaved?.(updated)
@@ -232,7 +243,7 @@ export default function MinuteForm({
         </label>
         <textarea
           id="tarea"
-          name="tarea_realizada"     /* ✅ ahora el form tiene 'name' coherente */
+          name="tarea_realizada"
           rows={6}
           placeholder={
             mode === 'create'
@@ -247,7 +258,6 @@ export default function MinuteForm({
             }))
           }
           className={ui.textarea}
-          /* ✅ usa validación interna según prop */
           required={mode === 'create' ? true : !ignoreTareaValidation}
         />
       </div>
@@ -274,7 +284,7 @@ export default function MinuteForm({
         </div>
       )}
 
-      {/* Adjuntos (se ocultan en /minutas/nueva hasta tener minuteId) */}
+      {/* Adjuntos (crear) */}
       {mode === 'create' && (
         <div className={`${ui.field} ${ui.full}`}>
           <label className={ui.label}>
