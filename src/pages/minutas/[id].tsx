@@ -1,20 +1,6 @@
-// src/pages/minutas/[id].tsx
 /**
  * Detalle de minuta — con Pause/Resume basado en intervalos.
- *
- * Reglas:
- * - Start: crea intervalo activo (minute_interval). Si es el primero, fija start_time en minute.
- * - Pause: cierra intervalo activo (ended_at = now()).
- * - Resume: crea nuevo intervalo activo (igual que Start).
- * - Stop: cierra intervalo activo (si lo hay) y fija end_time en minute.
- *
- * Cálculo de duración:
- * - Suma (ended_at - started_at) de todos los intervalos (los abiertos suman hasta "ahora").
- * - Muestra estados: Sin iniciar | En curso | En pausa | Finalizado.
- *
- * Seguridad:
- * - Solo el dueño ve los botones (admin = solo lectura).
- * - RLS en BD (ver SQL de minute_interval).
+ * (ADMIN ve creador; worker edita sólo lo propio)
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
@@ -22,7 +8,7 @@ import { useRouter } from 'next/router'
 import useSWR from 'swr'
 import dayjs from 'dayjs'
 import { Container, Row, Col, Spinner, Alert, Card, Button, Badge } from 'react-bootstrap'
-import { FiHash, FiCalendar, FiClock, FiArrowLeft, FiPlay, FiPause, FiRotateCw, FiSquare } from 'react-icons/fi'
+import { FiHash, FiCalendar, FiClock, FiArrowLeft, FiPlay, FiPause, FiRotateCw, FiSquare, FiUser } from 'react-icons/fi'
 import { supabase } from '@/lib/supabaseClient'
 import { useAuth } from '@/contexts/AuthContext'
 import SessionGate from '@/components/SessionGate'
@@ -32,22 +18,9 @@ import { resolveFolio } from '@/lib/folio'
 import ui from '@/styles/MinuteDetail.module.css'
 import userUi from '@/styles/MinuteFormUser.module.css'
 import LockTareaRealizada from '@/components/LockTareaRealizada'
+import { getMinuteByIdWithCreator, type MinuteWithCreator } from '@/lib/minutes'
 
 const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
-
-type MinuteRow = {
-  id: string
-  date?: string | null
-  start_time?: string | null
-  end_time?: string | null
-  tarea_realizada?: string | null
-  novedades?: string | null
-  description?: string | null
-  notes?: string | null
-  user_id: string
-  folio?: string | number | null
-  folio_serial?: string | number | null
-}
 
 type IntervalRow = {
   id: string
@@ -77,9 +50,9 @@ function fmtDurationFromSeconds(totalSecs: number): string {
   return `${s}s`
 }
 
-function tareaFrom(row?: MinuteRow | null): string {
+function tareaFrom(row?: MinuteWithCreator | null): string {
   if (!row) return ''
-  return (row.tarea_realizada ?? row.description ?? '') as string
+  return (row.tarea_realizada ?? (row as any).description ?? '') as string
 }
 
 /** Espeja al textarea interno del MinuteForm para pasar validaciones */
@@ -95,17 +68,6 @@ function mirrorTareaToMinuteForm(text: string) {
 }
 
 /* ==================== Data ==================== */
-async function fetchMinuteById(_key: string, id: string): Promise<MinuteRow> {
-  const { data: row, error } = await supabase
-    .from('minute')
-    .select('id,date,start_time,end_time,tarea_realizada,novedades,description,notes,user_id,folio,folio_serial')
-    .eq('id', id)
-    .single()
-  if (error) throw new Error(error.message)
-  if (!row) throw new Error('Minuta no encontrada')
-  return row as unknown as MinuteRow
-}
-
 async function fetchIntervals(_key: string, minuteId: string): Promise<IntervalRow[]> {
   const { data, error } = await supabase
     .from('minute_interval')
@@ -132,20 +94,23 @@ export default function MinuteDetailPage() {
   const userId = user?.id ?? null
   const isAdmin = user?.email === ADMIN_EMAIL
 
-  // Carga de minuta e intervalos (SWR condicionado por sesión y id)
-  const minuteKey = id && status === 'authenticated' ? (['minute', id] as const) : null
-  const { data: minute, isLoading: isMinuteLoading, error: minuteError, mutate: mutateMinute } = useSWR<MinuteRow>(
-    minuteKey,
-    ([_tag, theId]) => fetchMinuteById(String(_tag), String(theId)),
-    { revalidateOnFocus: false }
-  )
+  // ⬇️ Minuta con creator_display (usa tipo correcto en SWR)
+  const minuteKey = id && status === 'authenticated' ? (['minute-with-creator', id] as const) : null
+  const { data: minute, isLoading: isMinuteLoading, error: minuteError, mutate: mutateMinute } =
+    useSWR<MinuteWithCreator | null>(
+      minuteKey,
+      ([_tag, theId]) => getMinuteByIdWithCreator(String(theId)),
+      { revalidateOnFocus: false }
+    )
 
+  // Intervals
   const intervalsKey = id && status === 'authenticated' ? (['intervals', id] as const) : null
-  const { data: intervals, isLoading: isIntervalsLoading, error: intervalsError, mutate: mutateIntervals } = useSWR<IntervalRow[]>(
-    intervalsKey,
-    ([_tag, theId]) => fetchIntervals(String(_tag), String(theId)),
-    { revalidateOnFocus: true }
-  )
+  const { data: intervals, isLoading: isIntervalsLoading, error: intervalsError, mutate: mutateIntervals } =
+    useSWR<IntervalRow[]>(
+      intervalsKey,
+      ([_tag, theId]) => fetchIntervals(String(_tag), String(theId)),
+      { revalidateOnFocus: true }
+    )
 
   // Estado derivado
   const isOwner = useMemo(() => !!minute && !!userId && minute.user_id === userId, [minute, userId])
@@ -194,18 +159,18 @@ export default function MinuteDetailPage() {
     await Promise.all([mutateIntervals(), mutateMinute()])
   }
 
+  function nowIso() { return new Date().toISOString() }
+
   async function handleStartOrResume(kind: 'start' | 'resume') {
     if (!id || !isOwner || hasEnded || opLoading) return
     setOpErr(null); setOpLoading(kind)
     try {
-      // 1) Cierra cualquier duplicado “activo” izquierda (por seguridad)
       await supabase
         .from('minute_interval')
-        .update({ ended_at: new Date().toISOString() })
+        .update({ ended_at: nowIso() })
         .eq('minute_id', id)
         .is('ended_at', null)
 
-      // 2) Inserta intervalo activo
       const ins = await supabase
         .from('minute_interval')
         .insert({ minute_id: id })
@@ -213,7 +178,6 @@ export default function MinuteDetailPage() {
         .single()
 
       if (ins.error && ins.error.code !== '23505') throw ins.error
-      // 3) Si nunca tuvo start_time, lo fijamos (solo la primera vez)
       if (!minute?.start_time) {
         await supabase.from('minute')
           .update({ start_time: nowAsPgTime(), end_time: null })
@@ -233,7 +197,7 @@ export default function MinuteDetailPage() {
     try {
       const { error } = await supabase
         .from('minute_interval')
-        .update({ ended_at: new Date().toISOString() })
+        .update({ ended_at: nowIso() })
         .eq('minute_id', id)
         .is('ended_at', null)
       if (error) throw error
@@ -249,14 +213,12 @@ export default function MinuteDetailPage() {
     if (!id || !isOwner || hasEnded || opLoading) return
     setOpErr(null); setOpLoading('stop')
     try {
-      // 1) Cerrar intervalo activo si existe
       await supabase
         .from('minute_interval')
-        .update({ ended_at: new Date().toISOString() })
+        .update({ ended_at: nowIso() })
         .eq('minute_id', id)
         .is('ended_at', null)
 
-      // 2) Marcar end_time en minute (compatibilidad con tu UI/listas)
       const { error: updErr } = await supabase
         .from('minute')
         .update({ end_time: nowAsPgTime() })
@@ -265,7 +227,6 @@ export default function MinuteDetailPage() {
 
       await doRefresh()
 
-      // 3) Enfocar editor
       window.setTimeout(() => {
         const el = document.querySelector<HTMLElement>(
           'textarea[name="tareaRealizada"], textarea[name="tarea_realizada"]'
@@ -281,15 +242,26 @@ export default function MinuteDetailPage() {
   }
 
   // Guardado “tarea realizada” (debounce)
-  async function persistTarea(text: string) {
-    if (!id) return
-    const { error } = await supabase
-      .from('minute')
-      .update({ tarea_realizada: text, description: text })
-      .eq('id', id)
-    if (error) throw error
-    await mutateMinute({ ...(minute as MinuteRow), tarea_realizada: text, description: text }, { revalidate: false })
-  }
+  // Reemplaza TODO el bloque de persistTarea por este
+async function persistTarea(text: string) {
+  if (!id) return;
+
+  // 1) Persistimos en BD (puedes seguir seteando description para compatibilidad)
+  const { error } = await supabase
+    .from("minute")
+    .update({ tarea_realizada: text, description: text })
+    .eq("id", id);
+
+  if (error) throw error;
+
+  // 2) Actualizamos el cache local de SWR SIN description (el tipo no la expone)
+  await mutateMinute(
+    (curr) =>
+      curr ? ({ ...curr, tarea_realizada: text } as MinuteWithCreator) : curr,
+    { revalidate: false }
+  );
+}
+
   function scheduleSave(text: string, delay = 800) {
     if (tareaLocked) return
     setSaveState('saving')
@@ -336,13 +308,13 @@ export default function MinuteDetailPage() {
 
   const { display: folioText } = resolveFolio({
     id: minute?.id ?? '',
-    folio: minute?.folio as any,
-    folio_serial: minute?.folio_serial as any,
+    folio: (minute as any)?.folio,
+    folio_serial: (minute as any)?.folio_serial,
   })
   const dateStr = minute?.date ? dayjs(minute.date).format('DD/MM/YYYY') : '—'
   const timeStr = `${toHHMM(minute?.start_time) || '—'} — ${toHHMM(minute?.end_time) || '—'}`
 
-  const showOwnerEdit = !!minute && isOwner && !isAdmin
+  const showOwnerEdit = !!minute && !!userId && minute.user_id === userId && !isAdmin
   const canEditTarea = showOwnerEdit && !!minute?.end_time && !tareaLocked
 
   const statusBadge = hasEnded
@@ -356,7 +328,6 @@ export default function MinuteDetailPage() {
   return (
     <SessionGate requireAuth>
       <Container className={ui.wrapper}>
-        {/* Loading simple mientras llega todo */}
         {(status === 'loading' || isMinuteLoading || isIntervalsLoading) && (
           <div className="py-4 d-flex align-items-center gap-2"><Spinner animation="border" size="sm" /><span>Cargando…</span></div>
         )}
@@ -380,6 +351,13 @@ export default function MinuteDetailPage() {
                 <div className={ui.meta}>
                   <span className={ui.metaItem}><FiCalendar /> {dateStr}</span>
                   <span className={ui.metaItem}><FiClock /> {timeStr}</span>
+
+                  {/* SOLO ADMIN: mostrar Creador resuelto */}
+                  {isAdmin && (
+                    <span className={ui.metaItem} title="Creador de la minuta">
+                      <FiUser /> {minute.creator_display ?? '—'}
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -487,7 +465,7 @@ export default function MinuteDetailPage() {
                           autosaveDelayMs={800}
                           initialValues={{
                             tarea_realizada: tareaValueServer,
-                            novedades: minute.novedades ?? '',
+                            novedades: (minute as any).novedades ?? '',
                           }}
                           ignoreTareaValidation={true}
                           tareaMirrorValue={tareaText}
@@ -511,12 +489,20 @@ export default function MinuteDetailPage() {
                   ) : (
                     <Card.Body>
                       <div className={ui.kvGrid} aria-label="Resumen de campos">
-                        <div className={ui.k}><FiCalendar /> Fecha</div><div className={ui.v}>{dateStr}</div>
-                        <div className={ui.k}><FiClock /> Horario</div><div className={ui.v}>{timeStr}</div>
+                        <div className={ui.k}><FiCalendar /> Fecha</div>
+                        <div className={ui.v}>{dateStr}</div>
+                        <div className={ui.k}><FiClock /> Horario</div>
+                        <div className={ui.v}>{timeStr}</div>
+                        {isAdmin && (
+                          <>
+                            <div className={ui.k}><FiUser /> Creador</div>
+                            <div className={ui.v}>{minute.creator_display ?? <span className={ui.muted}>—</span>}</div>
+                          </>
+                        )}
                         <div className={ui.k}>Tarea realizada</div>
                         <div className={ui.v}>{tareaValueServer || <span className={ui.muted}>—</span>}</div>
                         <div className={ui.k}>Novedades</div>
-                        <div className={ui.v}>{minute?.novedades || <span className={ui.muted}>—</span>}</div>
+                        <div className={ui.v}>{(minute as any).novedades || <span className={ui.muted}>—</span>}</div>
                       </div>
                     </Card.Body>
                   )}
