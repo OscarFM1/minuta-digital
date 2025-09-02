@@ -56,6 +56,11 @@ function emptyToNull<T extends string | null | undefined>(v: T): string | null {
   return s === '' ? null : s
 }
 
+/** YYYY-MM-DD (hoy) — Útil para evitar NOT NULL en `date`. */
+function todayISO(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
 // ---------------------------------------------------------------------------
 // Detecciones cacheadas de columnas (introspección ligera)
 // ---------------------------------------------------------------------------
@@ -188,6 +193,7 @@ async function insertMinuteWithOwner(base: Record<string, unknown>, userId: stri
  *  - NO envía `folio` ni `folio_serial`. (El trigger en BD los genera.)
  *  - Si existen, setea created_by_name / created_by_email.
  *  - `description` sólo si la columna existe.
+ *  - ✅ Garantiza `date` (hoy) si no viene, para respetar NOT NULL.
  */
 export async function createMinute(input: {
   date?: string | null
@@ -201,9 +207,12 @@ export async function createMinute(input: {
   const userId = await getCurrentUserId()
   const { name, email } = await getCurrentUserIdentity()
 
+  // ✅ Si no nos pasan fecha, usamos hoy (evita NOT NULL)
+  const safeDate = emptyToNull(input.date ?? null) || todayISO()
+
   // Campos base (sin folio/serial) — normalizamos vacíos a null
   const base: Record<string, unknown> = {
-    date: emptyToNull(input.date ?? null),
+    date: safeDate, // 👈 nunca null
     start_time: emptyToNull(input.start_time ?? null),
     end_time: emptyToNull(input.end_time ?? null),
     tarea_realizada: emptyToNull(input.tarea_realizada ?? null),
@@ -229,6 +238,7 @@ export async function createMinute(input: {
  * updateMinute
  *  - Aplica un patch seguro (nunca toca `folio`/`folio_serial` ni dueño).
  *  - Devuelve la fila actualizada.
+ *  - ✅ Ya no envía `date: null` cuando `patch.date` es `undefined`.
  */
 export async function updateMinute(
   id: string,
@@ -243,17 +253,22 @@ export async function updateMinute(
     // ❌ NO permitir: folio, folio_serial, user_id, created_by
   }
 ): Promise<Minute> {
-  const normalized = pruneUndefined({
-    date: emptyToNull(patch.date ?? undefined as any),
-    start_time: emptyToNull(patch.start_time ?? undefined as any),
-    end_time: emptyToNull(patch.end_time ?? undefined as any),
-    tarea_realizada: emptyToNull(patch.tarea_realizada ?? undefined as any),
-    novedades: emptyToNull(patch.novedades ?? undefined as any),
-    is_protected: patch.is_protected,
-    description: emptyToNull(patch.description ?? undefined as any),
-  })
+  // Construimos el objeto **solo** con claves presentes y válidas.
+  const normalized: Record<string, any> = {}
 
-  const safe = sanitize(normalized as Record<string, any>, [
+  // 👇 Solo incluimos date si VIENE en el patch y no es null/''.
+  if (patch.date !== undefined) {
+    const d = emptyToNull(patch.date)
+    if (d !== null) normalized.date = d
+  }
+  if (patch.start_time !== undefined) normalized.start_time = emptyToNull(patch.start_time)
+  if (patch.end_time !== undefined)   normalized.end_time   = emptyToNull(patch.end_time)
+  if (patch.tarea_realizada !== undefined) normalized.tarea_realizada = emptyToNull(patch.tarea_realizada)
+  if (patch.novedades !== undefined)       normalized.novedades       = emptyToNull(patch.novedades)
+  if (patch.is_protected !== undefined)     normalized.is_protected    = patch.is_protected
+  if (patch.description !== undefined)      normalized.description     = emptyToNull(patch.description)
+
+  const safe = sanitize(pruneUndefined(normalized), [
     'folio',
     'folio_serial',
     'user_id',
@@ -340,4 +355,109 @@ export async function stopMinute(minuteId: string): Promise<Minute> {
   const { data, error } = await supabase.rpc('minute_stop', { p_minute_id: minuteId, p_user_id: userId })
   if (error) throw error
   return data as Minute
+}
+
+// ---------------------------------------------------------------------------
+// Eliminación segura de minuta (tester-only vía RLS) + limpieza best-effort
+// ---------------------------------------------------------------------------
+
+/**
+ * deleteMinute
+ * ----------------------------------------------------------------------------
+ * Elimina una minuta y sus adjuntos asociados. Está pensada para el flujo del
+ * usuario de pruebas (p. ej., `pruebas@login.local`), donde la **RLS** en BD
+ * permite el `DELETE` únicamente para su propio contenido.
+ *
+ * Comportamiento:
+ *  1) Lee los paths de `attachment` (si existen).
+ *  2) Intenta borrar los archivos del bucket de Storage (best-effort).
+ *  3) Elimina filas de `attachment` (por si NO hay ON DELETE CASCADE).
+ *  4) Elimina la fila de `minute`.
+ *
+ * Seguridad:
+ *  - Si el usuario no cumple la política RLS, Supabase devolverá `permission denied`.
+ *  - Esta función NO hace bypass de seguridad (no usa service role).
+ *
+ * Parámetros:
+ *  - minuteId: ID de la minuta a eliminar.
+ *  - options:
+ *      - bucket?: string        → bucket de Storage (default: env o "attachments").
+ *      - removeStorage?: boolean→ si false, NO intenta borrar archivos (default: true).
+ *
+ * Retorno:
+ *  - Objeto con cantidades borradas y el ID de la minuta.
+ *
+ * Notas:
+ *  - El borrado de Storage es best-effort: si falla, se continúa con el borrado
+ *    en BD para no bloquear la UI (los archivos huérfanos pueden depurarse luego).
+ *  - Si tienes FK con ON DELETE CASCADE para `attachment`, el paso (3) es inocuo:
+ *    intentará borrar y si ya no aplica, no afecta.
+ */
+export async function deleteMinute(
+  minuteId: string,
+  options: { bucket?: string; removeStorage?: boolean } = {}
+): Promise<{ minuteId: string; attachmentsFound: number; storageRemoved: number; attachmentsDeleted: number; }> {
+  const bucket = options.bucket || process.env.NEXT_PUBLIC_STORAGE_BUCKET || 'attachments'
+  const shouldRemoveStorage = options.removeStorage !== false
+
+  // 1) Leer adjuntos (paths) asociados a la minuta
+  let attachmentsFound = 0
+  let storageRemoved = 0
+  let attachmentsDeleted = 0
+
+  const { data: files, error: selErr } = await supabase
+    .from('attachment')
+    .select('id, path')
+    .eq('minute_id', minuteId)
+
+  if (selErr) {
+    // No detenemos el flujo: registramos para diagnóstico
+    console.warn('[deleteMinute] No se pudieron leer adjuntos:', selErr)
+  }
+
+  // 2) Borrar archivos en Storage (best-effort)
+  const paths = (files ?? [])
+    .map((f: any) => f?.path)
+    .filter((p: any) => typeof p === 'string' && p.trim().length > 0)
+
+  attachmentsFound = paths.length
+
+  if (shouldRemoveStorage && attachmentsFound > 0) {
+    const { error: rmErr } = await supabase.storage.from(bucket).remove(paths)
+    if (rmErr) {
+      console.warn('[deleteMinute] Falló borrar archivos de Storage:', rmErr)
+    } else {
+      storageRemoved = attachmentsFound // asumimos éxito si no hubo error
+    }
+  }
+
+  // 3) Borrar filas de `attachment` (por si NO hay cascade)
+  //    Usamos .select('id') para contar borrados de forma confiable.
+  const { data: delAttRows, error: delAttErr } = await supabase
+    .from('attachment')
+    .delete()
+    .eq('minute_id', minuteId)
+    .select('id')
+
+  if (delAttErr) {
+    // Puede fallar si ya existe cascade o no hay adjuntos; no bloqueamos
+    console.info('[deleteMinute] Borrado attachment omitible:', delAttErr)
+  } else {
+    attachmentsDeleted = delAttRows?.length ?? 0
+  }
+
+  // 4) Borrar la minuta
+  //    Usamos .select('id') para verificar el borrado; si RLS lo deniega, lanzará error.
+  const { error: delMinErr } = await supabase
+    .from('minute')
+    .delete()
+    .eq('id', minuteId)
+    .select('id')
+
+  if (delMinErr) {
+    // Típico: 42501 (permission denied) por RLS si NO es el tester autorizado.
+    throw delMinErr
+  }
+
+  return { minuteId, attachmentsFound, storageRemoved, attachmentsDeleted }
 }
