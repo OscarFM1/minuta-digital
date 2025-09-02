@@ -95,6 +95,19 @@ const PALETTE = {
 
 const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
 
+/* ============================================================================
+ * Lista blanca de correos para incluir en el tablero de estadísticas
+ * - Incluye el worker de QA por defecto: pruebas@login.local
+ * - Permite sumar correos extra por ENV: NEXT_PUBLIC_STATS_EXTRA_EMAILS="a@x.com,b@y.com"
+ * ==========================================================================*/
+const TEST_WORKER =
+  (process.env.NEXT_PUBLIC_TEST_WORKER_EMAIL || 'pruebas@login.local').toLowerCase()
+const EXTRA_ALLOWED =
+  (process.env.NEXT_PUBLIC_STATS_EXTRA_EMAILS || '')
+    .split(',')
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean)
+
 // ---------------- Config negocio ----------------
 const USERS = [
   { username: 'kat.acosta',   name: 'Katherine.A' },
@@ -102,9 +115,16 @@ const USERS = [
   { username: 'audia.mesa',   name: 'Audia Mesa' },
   { username: 'juan.diaz',    name: 'Juan Díaz' },
   { username: 'kat.blades',   name: 'Katherine.B' },
-].map(u => ({ ...u, email: `${u.username}@${LOGIN_DOMAIN}` }))
+  // 👇 añadimos explícitamente el worker de pruebas como usuario visible
+  { username: 'pruebas',      name: 'Tester (QA)' },
+].map(u => ({ ...u, email: `${u.username}@${LOGIN_DOMAIN}`.toLowerCase() }))
 
-const ALLOWED_EMAILS = USERS.map(u => u.email)
+// Lista final (única) para las consultas
+const ALLOWED_EMAILS = Array.from(new Set([
+  ...USERS.map(u => u.email),
+  TEST_WORKER,
+  ...EXTRA_ALLOWED,
+]))
 
 const LUNCH_MIN = 60
 const BREAK_MIN = 20
@@ -156,7 +176,6 @@ function minToHhmm(min: number) {
   const mm = M % 60
   return `${sign}${pad(hh)}:${pad(mm)}`
 }
-
 
 // ---------------- Tipos ----------------
 type MinuteRow = {
@@ -252,9 +271,6 @@ export default function AdminEstadisticasPage() {
     return () => { clearTimeout(t); window.removeEventListener('scroll', onScroll) }
   }, [])
 
-  // ⛔️ Se eliminó el guard por email y el estado "checking".
-  //     <RequireRole> hará el gating de acceso y la redirección necesaria.
-
   const [loading, setLoading] = useState(false)
   const [rows, setRows] = useState<MinuteRow[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -265,7 +281,7 @@ export default function AdminEstadisticasPage() {
   const chartDailyRef = useRef<HTMLDivElement | null>(null)
   const donutRef = useRef<HTMLDivElement | null>(null)
 
-  // Fetch mensual SOLO de los 5 usuarios conocidos
+  // Fetch mensual SOLO de los usuarios de la lista blanca (USERS + QA/env)
   useEffect(() => {
     setLoading(true)
     setError(null)
@@ -304,7 +320,7 @@ export default function AdminEstadisticasPage() {
     const perUserPerDay: PerUserPerDay = new Map()
 
     for (const r of rows) {
-      const email = r.created_by_email ?? ''
+      const email = (r.created_by_email ?? '').toLowerCase()
       if (!email || !(email in base)) continue
 
       const date = r.date ?? ''
@@ -671,7 +687,7 @@ export default function AdminEstadisticasPage() {
                         <PieChart>
                           <Pie
                             data={[
-                              { name: 'Efectivo',           value: +(Math.min(detail.effectiveMin, Math.max(1, expectedMonthEffectiveMin)) / 60).toFixed(2) },
+                              { name: 'Efectivo',           value: +(Math.min(detail.effectiveMin, Math.max(1, expectedMonthEffectiveMin) ) / 60).toFixed(2) },
                               { name: 'Restante para meta', value: +(Math.max(0, expectedMonthEffectiveMin - detail.effectiveMin) / 60).toFixed(2) },
                             ]}
                             dataKey="value"
