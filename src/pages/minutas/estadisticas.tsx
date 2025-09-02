@@ -1,7 +1,14 @@
+// src/pages/minutas/estadisticas.tsx
 /**
  * Estadísticas mensuales (ADMIN) + Exportación CSV/XLSX con gráficos (imágenes).
- * + Nudge visual para el filtro de Mes
- * + Botón Volver (estilizado)
+ * 🔒 Protegida por rol: admin | super_admin (RequireRole)
+ *   - Se eliminó el guard de email (ADMIN_EMAIL) y el useEffect de verificación manual.
+ *   - Si el usuario tiene must_change_password=true, <RequireRole> redirige a /cambiar-password.
+ *   - Si no tiene rol permitido, <RequireRole> redirige a /403 (o /login según tu componente).
+ *
+ * Buenas prácticas:
+ * - El acceso se aplica en UI y BD (RLS ya permite SELECT global a admin/super_admin).
+ * - Mantén este gating también en cualquier API /api/stats/* que consuma este dashboard.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -13,6 +20,7 @@ import {
 } from 'react-bootstrap'
 import { FiArrowLeft, FiInfo } from 'react-icons/fi'
 import { supabase } from '@/lib/supabaseClient'
+import RequireRole from '@/components/RequireRole' // 🔒 GATING por rol
 
 // ---------- Recharts: dynamic con { default: ... } + ssr:false ----------
 const ResponsiveContainer = dynamic(
@@ -85,7 +93,6 @@ const PALETTE = {
   donutBg:   '#e5e7eb',
 }
 
-const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
 const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
 
 // ---------------- Config negocio ----------------
@@ -245,7 +252,9 @@ export default function AdminEstadisticasPage() {
     return () => { clearTimeout(t); window.removeEventListener('scroll', onScroll) }
   }, [])
 
-  const [checking, setChecking] = useState(true)
+  // ⛔️ Se eliminó el guard por email y el estado "checking".
+  //     <RequireRole> hará el gating de acceso y la redirección necesaria.
+
   const [loading, setLoading] = useState(false)
   const [rows, setRows] = useState<MinuteRow[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -256,21 +265,8 @@ export default function AdminEstadisticasPage() {
   const chartDailyRef = useRef<HTMLDivElement | null>(null)
   const donutRef = useRef<HTMLDivElement | null>(null)
 
-  // Guard admin
-  useEffect(() => {
-    const check = async () => {
-      const { data } = await supabase.auth.getUser()
-      const user = data?.user
-      if (!user) { router.replace('/login'); return }
-      if ((user.email ?? '') !== ADMIN_EMAIL) { router.replace('/login?unauthorized=1'); return }
-      setChecking(false)
-    }
-    check()
-  }, [router])
-
   // Fetch mensual SOLO de los 5 usuarios conocidos
   useEffect(() => {
-    if (checking) return
     setLoading(true)
     setError(null)
     ;(async () => {
@@ -291,7 +287,7 @@ export default function AdminEstadisticasPage() {
         setLoading(false)
       }
     })()
-  }, [checking, startISO, endISO])
+  }, [startISO, endISO])
 
   // Agregación por usuario
   const dataByUser: UserAgg[] = useMemo(() => {
@@ -488,7 +484,7 @@ export default function AdminEstadisticasPage() {
   /* ============================================================ */
 
   return (
-    <>
+    <RequireRole allow={['admin','super_admin']}> {/* 🔒 Gating por rol */}
       <Head><title>Estadísticas mensuales — Admin</title></Head>
 
       <Container className="py-4">
@@ -823,6 +819,6 @@ export default function AdminEstadisticasPage() {
           box-shadow: 0 0 0 .2rem rgba(0,154,218,.35);
         }
       `}</style>
-    </>
+    </RequireRole>
   )
 }
