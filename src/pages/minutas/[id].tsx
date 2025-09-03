@@ -2,16 +2,9 @@
  * Detalle de minuta — con Pause/Resume basado en intervalos.
  * ============================================================================
  * Cambios clave (rol-admin + creador):
- * - Reemplaza el check por email por gating de **roles** usando `useRole`.
- * - Admin/SuperAdmin (isAdminRole=true) ven la minuta en **solo lectura** y
- *   se les muestra el **Creador** (minute.creator_display) en:
- *     1) La franja HERO (metadatos superiores).
- *     2) La tarjeta de "Información básica".
- * - Workers mantienen edición sólo si son dueños (isOwner && !isAdminRole).
- *
- * Buenas prácticas:
- * - SWR tipado con MinuteWithCreator para evitar divergencias.
- * - Mutación local del cache sin `description` (el tipo no la expone).
+ * - Gating por roles con useRole (admin/super_admin = solo lectura).
+ * - Admin ve el "Creador" (creator_display) en HERO y tarjeta.
+ * - Se muestra y mantiene en edición el "Tipo de trabajo" (work_type).
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
@@ -31,6 +24,7 @@ import userUi from '@/styles/MinuteFormUser.module.css'
 import LockTareaRealizada from '@/components/LockTareaRealizada'
 import { getMinuteByIdWithCreator, type MinuteWithCreator } from '@/lib/minutes'
 import { useRole } from '@/hooks/useRole'
+import { WORK_TYPE_LABEL } from '@/types/minute' // 👈 labels amigables de work_type
 
 type IntervalRow = {
   id: string
@@ -264,8 +258,6 @@ export default function MinuteDetailPage() {
   }
 
   // Guardado “tarea realizada” (debounce)
-  // Nota: en BD también seteamos description por compatibilidad con vistas antiguas,
-  // pero en cache local sólo actualizamos tarea_realizada (el tipo no incluye description).
   async function persistTarea(text: string) {
     if (!id) return
     const { error } = await supabase
@@ -466,12 +458,6 @@ export default function MinuteDetailPage() {
                         </div>
                       )}
 
-                      {tareaLocked && (
-                        <Alert variant="secondary" className="mb-3">
-                          La <strong>tarea realizada</strong> fue guardada y ahora está bloqueada.
-                        </Alert>
-                      )}
-
                       {/* MinuteForm para resto de campos (oculto tarea/horas) */}
                       <div className="mm-hide-tarea mm-hide-hours">
                         <MinuteForm
@@ -484,12 +470,12 @@ export default function MinuteDetailPage() {
                           initialValues={{
                             tarea_realizada: tareaValueServer,
                             novedades: (minute as any).novedades ?? '',
+                            work_type: (minute as any).work_type ?? '',
                           }}
                           ignoreTareaValidation={true}
                           tareaMirrorValue={tareaText}
                           onSaved={async () => {
-                            setTareaLocked(true)
-                            try { await supabase.from('minute').update({ tarea_cerrada: true }).eq('id', minute.id) } catch {}
+                            // No bloquear por cambios de work_type/autosave, sólo refrescar
                             await mutateMinute(undefined, { revalidate: true })
                           }}
                         />
@@ -519,6 +505,15 @@ export default function MinuteDetailPage() {
                             <div className={ui.v}>{minute.creator_display ?? <span className={ui.muted}>—</span>}</div>
                           </>
                         )}
+
+                        {/* Tipo de trabajo (label amigable) */}
+                        <div className={ui.k}>Tipo de trabajo</div>
+                        <div className={ui.v}>
+                          { (minute as any)?.work_type
+                            ? WORK_TYPE_LABEL[(minute as any).work_type as keyof typeof WORK_TYPE_LABEL]
+                            : <span className={ui.muted}>—</span>
+                          }
+                        </div>
 
                         <div className={ui.k}>Tarea realizada</div>
                         <div className={ui.v}>{tareaValueServer || <span className={ui.muted}>—</span>}</div>
