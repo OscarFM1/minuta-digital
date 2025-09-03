@@ -12,6 +12,12 @@
  *
  * ⚠️ Workers: al crear solo pueden crear la minuta y adjuntar evidencias.
  *   No hay edición de tiempos ni asignación manual de fechas en este form.
+ *
+ * NUEVO:
+ * - Campo "work_type" (Tipo de trabajo) con opciones fijas:
+ *   gran_formato | publicomercial | editorial | empaques
+ *   -> Se almacena como string en BD (normalización se hace en lib/minutes.ts).
+ *   -> Si la columna no existe en BD, la capa de datos no la envía (tolerante).
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -20,11 +26,18 @@ import { createMinute, updateMinute } from '@/lib/minutes'
 import { uploadAttachment, createAttachmentRecords } from '@/lib/uploadAttachment'
 import type { Minute } from '@/types/minute'
 import ui from '@/styles/NewMinute.module.css'
+import { WORK_TYPE_OPTIONS } from '@/types/minute'
 
 /** Valores que este form maneja (sin horas) */
 type FormValues = {
   tarea_realizada: string
   novedades: string
+  /**
+   * NEW: Tipo de trabajo (snake_case). Se guarda tal cual en el payload;
+   * la normalización/validación fina se hace en lib/minutes.ts
+   * (normalizeWorkType + hasWorkTypeColumn).
+   */
+  work_type?: string | null
 }
 
 type MinuteId = string
@@ -66,11 +79,13 @@ export default function MinuteForm({
   ignoreTareaValidation = false,
   tareaMirrorValue,
 }: MinuteFormProps) {
-  // Valores iniciales
+  // Valores iniciales (⚠️ incluir work_type para hidratar el <select>)
   const init = useMemo<FormValues>(
     () => ({
       tarea_realizada: initialValues?.tarea_realizada ?? '',
       novedades: initialValues?.novedades ?? '',
+      // work_type se modela como string | null (el <select> usa '' cuando null)
+      work_type: initialValues?.work_type ?? null,
     }),
     [initialValues]
   )
@@ -104,7 +119,9 @@ export default function MinuteForm({
 
   // -------- Helpers --------
   const isSame = (a: FormValues, b: FormValues) =>
-    a.tarea_realizada === b.tarea_realizada && a.novedades === b.novedades
+    a.tarea_realizada === b.tarea_realizada &&
+    a.novedades === b.novedades &&
+    (a.work_type ?? null) === (b.work_type ?? null)
 
   const validateForSubmit = (): string | null => {
     if (!ignoreTareaValidation && !values.tarea_realizada.trim())
@@ -112,6 +129,7 @@ export default function MinuteForm({
     if (mode === 'create' && requireAttachmentOnCreate && files.length === 0) {
       return 'Debes adjuntar al menos un archivo como evidencia.'
     }
+    // work_type NO es obligatorio: si no se elige, enviamos null y la DAO lo ignora si la columna no existe.
     return null
   }
 
@@ -129,10 +147,13 @@ export default function MinuteForm({
         const updated = await updateMinute(minuteId, {
           tarea_realizada: snapshot.tarea_realizada.trim(),
           novedades: snapshot.novedades.trim() ? snapshot.novedades.trim() : null,
+          // En edición permitimos cambiar también el tipo (opcional)
+          work_type: snapshot.work_type ?? null,
         })
         setLastSaved({
           tarea_realizada: snapshot.tarea_realizada,
           novedades: snapshot.novedades,
+          work_type: snapshot.work_type ?? null,
         })
         setAutoStatus('saved')
         onSaved?.(updated)
@@ -148,7 +169,7 @@ export default function MinuteForm({
     if (mode !== 'edit' || !autosaveEnabled) return
     debouncedAutosave(values)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [values.tarea_realizada, values.novedades])
+  }, [values.tarea_realizada, values.novedades, values.work_type])
 
   // Submit manual (create o edit)
   const onSubmit = async () => {
@@ -170,6 +191,8 @@ export default function MinuteForm({
           tarea_realizada: values.tarea_realizada.trim(),
           description: title.trim() ? title.trim() : undefined,
           novedades: null,
+          // NEW: se envía el tipo seleccionado (o null). La DAO lo normaliza/valida
+          work_type: values.work_type ?? null,
           // start_time / end_time se manejan por Start/Stop fuera del form
         })
 
@@ -188,6 +211,7 @@ export default function MinuteForm({
         const updated = await updateMinute(minuteId, {
           tarea_realizada: values.tarea_realizada.trim(),
           novedades: values.novedades.trim() ? values.novedades.trim() : null,
+          work_type: values.work_type ?? null, // idem create
         })
         setLastSaved(values)
         onSaved?.(updated)
@@ -209,6 +233,12 @@ export default function MinuteForm({
     if (dropped.length) setFiles((prev) => [...prev, ...dropped])
   }
   const fileNames = files.map((f) => f.name).join(', ')
+
+  // Handler para el <select> (convierte '' -> null)
+  const onWorkTypeChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const v = e.target.value
+    setValues(prev => ({ ...prev, work_type: v ? v : null }))
+  }
 
   return (
     <form
@@ -235,6 +265,31 @@ export default function MinuteForm({
           />
         </div>
       )}
+
+      {/* ===================== Tipo de trabajo (nuevo) ===================== */}
+      <div className={ui.field}>
+        <label className={ui.label} htmlFor="work_type">
+          Tipo de trabajo
+        </label>
+        <select
+          id="work_type"
+          name="work_type"
+          className={ui.select ?? 'form-select'}
+          value={values.work_type ?? ''}        // '' cuando null para mostrar "Selecciona…"
+          onChange={onWorkTypeChange}
+        >
+          <option value="">Selecciona…</option>
+          {WORK_TYPE_OPTIONS.map(opt => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+        <small className={ui.help}>
+          Elige la línea a la que pertenece esta minuta. (Opcional)
+        </small>
+      </div>
+      {/* =================================================================== */}
 
       {/* Tarea (create: a realizar / edit: realizada) */}
       <div className={`${ui.field} ${ui.full}`}>
