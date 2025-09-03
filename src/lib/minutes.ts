@@ -1,3 +1,4 @@
+// src/lib/minutes.ts
 /**
  * Capa de acceso a datos para MINUTAS
  * ============================================================================
@@ -6,19 +7,24 @@
  *   (Los asigna el trigger en la BD. Concurrency-safe.)
  * - Reintentar 1 vez ante 23505 (duplicate key) para resolver carreras.
  * - Ser tolerante a esquemas (instancias con `user_id` o `created_by`).
- * - No romper si faltan columnas opcionales (description, created_by_*).
+ * - No romper si faltan columnas opcionales (description, created_by_*, work_type).
  *
  * Buenas prácticas
  * - Insert con backoff corto (120ms) cuando ocurre 23505 (unique_violation).
  * - Nunca tocar `folio`/`folio_serial` ni columnas de dueño en UI.
  * - Selects tipados y helpers cacheados para introspección ligera.
  *
- * Requisitos en BD (ya existentes en prod):
+ * Requisitos en BD:
  * - Trigger que asigna folio/folio_serial (y UNIQUE efectiva por usuario).
+ * - Columna opcional `work_type` con CHECK de valores (si aplicaste la migración).
  */
 
 import { supabase } from '@/lib/supabaseClient'
 import type { Minute } from '@/types/minute'
+import { WORK_TYPE_VALUES } from '@/types/minute'
+
+// Derivamos el tipo localmente del valor runtime para evitar alias/imports dobles
+type WorkType = (typeof WORK_TYPE_VALUES)[number]
 
 // ---------------------------------------------------------------------------
 // Utils de errores y helpers generales
@@ -61,6 +67,13 @@ function todayISO(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
+/** Normaliza un valor arbitrario a WorkType (case/espacios → snake) o null si inválido. */
+function normalizeWorkType(v?: string | null): WorkType | null {
+  if (!v) return null
+  const s = String(v).trim().toLowerCase().replace(/\s+/g, '_')
+  return (WORK_TYPE_VALUES as readonly string[]).includes(s) ? (s as WorkType) : null
+}
+
 // ---------------------------------------------------------------------------
 // Detecciones cacheadas de columnas (introspección ligera)
 // ---------------------------------------------------------------------------
@@ -78,6 +91,8 @@ async function hasColumn(col: string): Promise<boolean> {
 }
 
 async function hasDescriptionColumn() { return hasColumn('description') }
+/** Detecta si existe la columna `work_type`. */
+async function hasWorkTypeColumn() { return hasColumn('work_type') }
 
 /**
  * Detecta la columna de “dueño” (propietario de la fila) disponible:
@@ -149,7 +164,6 @@ async function insertMinuteWithOwner(base: Record<string, unknown>, userId: stri
   let lastErr: any = null
 
   for (const payload of candidates) {
-    // Limpia undefined antes de enviar
     const clean = pruneUndefined(payload)
 
     // Intento 1
@@ -192,7 +206,7 @@ async function insertMinuteWithOwner(base: Record<string, unknown>, userId: stri
  * createMinute
  *  - NO envía `folio` ni `folio_serial`. (El trigger en BD los genera.)
  *  - Si existen, setea created_by_name / created_by_email.
- *  - `description` sólo si la columna existe.
+ *  - `description`/`work_type` solo si las columnas existen.
  *  - ✅ Garantiza `date` (hoy) si no viene, para respetar NOT NULL.
  */
 export async function createMinute(input: {
@@ -203,6 +217,7 @@ export async function createMinute(input: {
   novedades?: string | null
   is_protected?: boolean
   description?: string | null
+  work_type?: string | null
 }): Promise<Minute> {
   const userId = await getCurrentUserId()
   const { name, email } = await getCurrentUserIdentity()
@@ -230,6 +245,12 @@ export async function createMinute(input: {
     base.description = desc
   }
 
+  // work_type (si existe la columna y el valor es válido)
+  const wt = normalizeWorkType(input.work_type ?? null)
+  if (wt && (await hasWorkTypeColumn())) {
+    base.work_type = wt
+  }
+
   const row = await insertMinuteWithOwner(base, userId)
   return row
 }
@@ -250,6 +271,7 @@ export async function updateMinute(
     novedades?: string | null
     is_protected?: boolean
     description?: string | null
+    work_type?: string | null
     // ❌ NO permitir: folio, folio_serial, user_id, created_by
   }
 ): Promise<Minute> {
@@ -265,8 +287,13 @@ export async function updateMinute(
   if (patch.end_time !== undefined)   normalized.end_time   = emptyToNull(patch.end_time)
   if (patch.tarea_realizada !== undefined) normalized.tarea_realizada = emptyToNull(patch.tarea_realizada)
   if (patch.novedades !== undefined)       normalized.novedades       = emptyToNull(patch.novedades)
-  if (patch.is_protected !== undefined)     normalized.is_protected    = patch.is_protected
-  if (patch.description !== undefined)      normalized.description     = emptyToNull(patch.description)
+  if (patch.is_protected !== undefined)    normalized.is_protected    = patch.is_protected
+  if (patch.description !== undefined)     normalized.description     = emptyToNull(patch.description)
+
+  // work_type: permitimos limpiar (null) o actualizar si válido
+  if (patch.work_type !== undefined) {
+    normalized.work_type = normalizeWorkType(patch.work_type)
+  }
 
   const safe = sanitize(pruneUndefined(normalized), [
     'folio',
@@ -278,6 +305,10 @@ export async function updateMinute(
   // Sólo incluir description si existe la columna
   if ('description' in safe && safe.description && !(await hasDescriptionColumn())) {
     delete (safe as any).description
+  }
+  // Sólo incluir work_type si existe la columna
+  if ('work_type' in safe && !(await hasWorkTypeColumn())) {
+    delete (safe as any).work_type
   }
 
   const { data, error } = await supabase
@@ -308,7 +339,8 @@ export async function listMyMinutes(): Promise<Minute[]> {
     .select(`
       id, date, start_time, end_time, tarea_realizada, novedades,
       folio, folio_serial, created_at, updated_at, is_protected,
-      created_by_name, created_by_email, user_id, created_by
+      created_by_name, created_by_email, user_id, created_by,
+      work_type
     `)
     .order('date', { ascending: false })
     .order('start_time', { ascending: false })
@@ -328,7 +360,8 @@ export async function listAllMinutesForAdmin(): Promise<Minute[]> {
     .select(`
       id, date, start_time, end_time, tarea_realizada, novedades,
       folio, folio_serial, created_at, updated_at, is_protected,
-      created_by_name, created_by_email, user_id, created_by
+      created_by_name, created_by_email, user_id, created_by,
+      work_type
     `)
     .order('date', { ascending: false })
     .order('start_time', { ascending: false })
@@ -364,7 +397,7 @@ export async function stopMinute(minuteId: string): Promise<Minute> {
 /**
  * deleteMinute
  * ----------------------------------------------------------------------------
- * Elimina una minuta y sus adjuntos asociados. Está pensada para el flujo del
+ * Elimina una minuta y sus adjuntos asociados. Pensada para el flujo del
  * usuario de pruebas (p. ej., `pruebas@login.local`), donde la **RLS** en BD
  * permite el `DELETE` únicamente para su propio contenido.
  *
@@ -373,31 +406,12 @@ export async function stopMinute(minuteId: string): Promise<Minute> {
  *  2) Intenta borrar los archivos del bucket de Storage (best-effort).
  *  3) Elimina filas de `attachment` (por si NO hay ON DELETE CASCADE).
  *  4) Elimina la fila de `minute`.
- *
- * Seguridad:
- *  - Si el usuario no cumple la política RLS, Supabase devolverá `permission denied`.
- *  - Esta función NO hace bypass de seguridad (no usa service role).
- *
- * Parámetros:
- *  - minuteId: ID de la minuta a eliminar.
- *  - options:
- *      - bucket?: string        → bucket de Storage (default: env o "attachments").
- *      - removeStorage?: boolean→ si false, NO intenta borrar archivos (default: true).
- *
- * Retorno:
- *  - Objeto con cantidades borradas y el ID de la minuta.
- *
- * Notas:
- *  - El borrado de Storage es best-effort: si falla, se continúa con el borrado
- *    en BD para no bloquear la UI (los archivos huérfanos pueden depurarse luego).
- *  - Si tienes FK con ON DELETE CASCADE para `attachment`, el paso (3) es inocuo:
- *    intentará borrar y si ya no aplica, no afecta.
  */
 export async function deleteMinute(
   minuteId: string,
   options: { bucket?: string; removeStorage?: boolean } = {}
 ): Promise<{ minuteId: string; attachmentsFound: number; storageRemoved: number; attachmentsDeleted: number; }> {
-  const bucket = options.bucket || process.env.NEXT_PUBLIC_STORAGE_BUCKET || 'attachments'
+  const bucket = options.bucket || process.env.NEXT_PUBLIC_STORAGE_BUCKET || 'minutes'
   const shouldRemoveStorage = options.removeStorage !== false
 
   // 1) Leer adjuntos (paths) asociados a la minuta
@@ -411,7 +425,6 @@ export async function deleteMinute(
     .eq('minute_id', minuteId)
 
   if (selErr) {
-    // No detenemos el flujo: registramos para diagnóstico
     console.warn('[deleteMinute] No se pudieron leer adjuntos:', selErr)
   }
 
@@ -432,7 +445,6 @@ export async function deleteMinute(
   }
 
   // 3) Borrar filas de `attachment` (por si NO hay cascade)
-  //    Usamos .select('id') para contar borrados de forma confiable.
   const { data: delAttRows, error: delAttErr } = await supabase
     .from('attachment')
     .delete()
@@ -440,14 +452,12 @@ export async function deleteMinute(
     .select('id')
 
   if (delAttErr) {
-    // Puede fallar si ya existe cascade o no hay adjuntos; no bloqueamos
     console.info('[deleteMinute] Borrado attachment omitible:', delAttErr)
   } else {
     attachmentsDeleted = delAttRows?.length ?? 0
   }
 
   // 4) Borrar la minuta
-  //    Usamos .select('id') para verificar el borrado; si RLS lo deniega, lanzará error.
   const { error: delMinErr } = await supabase
     .from('minute')
     .delete()
@@ -542,7 +552,7 @@ export async function resolveCreatorDisplay(minuteRow: {
 export type MinuteWithCreator = Minute & { creator_display: string | null }
 
 export async function getMinuteByIdWithCreator(id: string): Promise<MinuteWithCreator | null> {
-  const row = await getMinuteById(id) // usa tu export existente
+  const row = await getMinuteById(id)
   if (!row) return null
   const creator_display = await resolveCreatorDisplay(row as any)
   return { ...(row as any), creator_display }
