@@ -1,6 +1,17 @@
 /**
  * Detalle de minuta — con Pause/Resume basado en intervalos.
- * (ADMIN ve creador; worker edita sólo lo propio)
+ * ============================================================================
+ * Cambios clave (rol-admin + creador):
+ * - Reemplaza el check por email por gating de **roles** usando `useRole`.
+ * - Admin/SuperAdmin (isAdminRole=true) ven la minuta en **solo lectura** y
+ *   se les muestra el **Creador** (minute.creator_display) en:
+ *     1) La franja HERO (metadatos superiores).
+ *     2) La tarjeta de "Información básica".
+ * - Workers mantienen edición sólo si son dueños (isOwner && !isAdminRole).
+ *
+ * Buenas prácticas:
+ * - SWR tipado con MinuteWithCreator para evitar divergencias.
+ * - Mutación local del cache sin `description` (el tipo no la expone).
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
@@ -19,8 +30,7 @@ import ui from '@/styles/MinuteDetail.module.css'
 import userUi from '@/styles/MinuteFormUser.module.css'
 import LockTareaRealizada from '@/components/LockTareaRealizada'
 import { getMinuteByIdWithCreator, type MinuteWithCreator } from '@/lib/minutes'
-
-const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
+import { useRole } from '@/hooks/useRole'
 
 type IntervalRow = {
   id: string
@@ -30,6 +40,8 @@ type IntervalRow = {
 }
 
 /* ==================== Utils ==================== */
+
+/** Normaliza a HH:mm tanto ‘HH:mm’, ‘HH:mm:ss’ como ISO. */
 function toHHMM(value?: string | null): string {
   if (!value) return ''
   const s = String(value).trim()
@@ -38,8 +50,11 @@ function toHHMM(value?: string | null): string {
   const d = dayjs(s)
   return d.isValid() ? d.format('HH:mm') : ''
 }
+
+/** Hora actual en formato compatible con PG TIME. */
 function nowAsPgTime(): string { return dayjs().format('HH:mm:ss') }
 
+/** Formato humano para segundos totales. */
 function fmtDurationFromSeconds(totalSecs: number): string {
   const secs = Math.max(0, Math.round(totalSecs))
   const h = Math.floor(secs / 3600)
@@ -50,12 +65,13 @@ function fmtDurationFromSeconds(totalSecs: number): string {
   return `${s}s`
 }
 
+/** Fallback para mostrar tarea: prioriza `tarea_realizada` y cae a `description`. */
 function tareaFrom(row?: MinuteWithCreator | null): string {
   if (!row) return ''
   return (row.tarea_realizada ?? (row as any).description ?? '') as string
 }
 
-/** Espeja al textarea interno del MinuteForm para pasar validaciones */
+/** Espeja al textarea interno del MinuteForm para pasar validaciones. */
 function mirrorTareaToMinuteForm(text: string) {
   const nodes = document.querySelectorAll<HTMLTextAreaElement>(
     'textarea[name="tareaRealizada"], textarea[name="tarea_realizada"]'
@@ -68,6 +84,7 @@ function mirrorTareaToMinuteForm(text: string) {
 }
 
 /* ==================== Data ==================== */
+
 async function fetchIntervals(_key: string, minuteId: string): Promise<IntervalRow[]> {
   const { data, error } = await supabase
     .from('minute_interval')
@@ -87,12 +104,17 @@ function sumIntervalsSeconds(intervals: IntervalRow[]): number {
   }, 0)
 }
 
+/* ==================== Page ==================== */
+
 export default function MinuteDetailPage() {
   const router = useRouter()
   const { id } = router.query as { id?: string }
   const { status, user } = useAuth()
   const userId = user?.id ?? null
-  const isAdmin = user?.email === ADMIN_EMAIL
+
+  // 🔐 Roles: worker escribe; admin/super_admin solo lectura
+  const { loading: roleLoading, canWriteMinutes } = useRole()
+  const isAdminRole = !roleLoading && !canWriteMinutes
 
   // ⬇️ Minuta con creator_display (usa tipo correcto en SWR)
   const minuteKey = id && status === 'authenticated' ? (['minute-with-creator', id] as const) : null
@@ -242,25 +264,20 @@ export default function MinuteDetailPage() {
   }
 
   // Guardado “tarea realizada” (debounce)
-  // Reemplaza TODO el bloque de persistTarea por este
-async function persistTarea(text: string) {
-  if (!id) return;
-
-  // 1) Persistimos en BD (puedes seguir seteando description para compatibilidad)
-  const { error } = await supabase
-    .from("minute")
-    .update({ tarea_realizada: text, description: text })
-    .eq("id", id);
-
-  if (error) throw error;
-
-  // 2) Actualizamos el cache local de SWR SIN description (el tipo no la expone)
-  await mutateMinute(
-    (curr) =>
-      curr ? ({ ...curr, tarea_realizada: text } as MinuteWithCreator) : curr,
-    { revalidate: false }
-  );
-}
+  // Nota: en BD también seteamos description por compatibilidad con vistas antiguas,
+  // pero en cache local sólo actualizamos tarea_realizada (el tipo no incluye description).
+  async function persistTarea(text: string) {
+    if (!id) return
+    const { error } = await supabase
+      .from('minute')
+      .update({ tarea_realizada: text, description: text })
+      .eq('id', id)
+    if (error) throw error
+    await mutateMinute(
+      (curr) => (curr ? ({ ...curr, tarea_realizada: text } as MinuteWithCreator) : curr),
+      { revalidate: false }
+    )
+  }
 
   function scheduleSave(text: string, delay = 800) {
     if (tareaLocked) return
@@ -314,7 +331,8 @@ async function persistTarea(text: string) {
   const dateStr = minute?.date ? dayjs(minute.date).format('DD/MM/YYYY') : '—'
   const timeStr = `${toHHMM(minute?.start_time) || '—'} — ${toHHMM(minute?.end_time) || '—'}`
 
-  const showOwnerEdit = !!minute && !!userId && minute.user_id === userId && !isAdmin
+  // 🔒 Sólo el dueño y que además sea worker (no admin) puede editar
+  const showOwnerEdit = !!minute && !!userId && minute.user_id === userId && !isAdminRole
   const canEditTarea = showOwnerEdit && !!minute?.end_time && !tareaLocked
 
   const statusBadge = hasEnded
@@ -328,7 +346,7 @@ async function persistTarea(text: string) {
   return (
     <SessionGate requireAuth>
       <Container className={ui.wrapper}>
-        {(status === 'loading' || isMinuteLoading || isIntervalsLoading) && (
+        {(status === 'loading' || isMinuteLoading || isIntervalsLoading || roleLoading) && (
           <div className="py-4 d-flex align-items-center gap-2"><Spinner animation="border" size="sm" /><span>Cargando…</span></div>
         )}
 
@@ -352,8 +370,8 @@ async function persistTarea(text: string) {
                   <span className={ui.metaItem}><FiCalendar /> {dateStr}</span>
                   <span className={ui.metaItem}><FiClock /> {timeStr}</span>
 
-                  {/* SOLO ADMIN: mostrar Creador resuelto */}
-                  {isAdmin && (
+                  {/* ADMIN/SUPER_ADMIN: mostrar Creador resuelto */}
+                  {isAdminRole && (
                     <span className={ui.metaItem} title="Creador de la minuta">
                       <FiUser /> {minute.creator_display ?? '—'}
                     </span>
@@ -493,12 +511,15 @@ async function persistTarea(text: string) {
                         <div className={ui.v}>{dateStr}</div>
                         <div className={ui.k}><FiClock /> Horario</div>
                         <div className={ui.v}>{timeStr}</div>
-                        {isAdmin && (
+
+                        {/* ADMIN/SUPER_ADMIN: mostrar creador también en la tarjeta */}
+                        {isAdminRole && (
                           <>
                             <div className={ui.k}><FiUser /> Creador</div>
                             <div className={ui.v}>{minute.creator_display ?? <span className={ui.muted}>—</span>}</div>
                           </>
                         )}
+
                         <div className={ui.k}>Tarea realizada</div>
                         <div className={ui.v}>{tareaValueServer || <span className={ui.muted}>—</span>}</div>
                         <div className={ui.k}>Novedades</div>
