@@ -1,3 +1,4 @@
+// src/pages/minutas/[id].tsx
 /**
  * Detalle de minuta — con Pause/Resume basado en intervalos.
  * ============================================================================
@@ -470,12 +471,12 @@ export default function MinuteDetailPage() {
                           initialValues={{
                             tarea_realizada: tareaValueServer,
                             novedades: (minute as any).novedades ?? '',
-                            work_type: (minute as any).work_type ?? '',
                           }}
+                          initialWorkType={(minute as any).work_type ?? null}   // 👈 PASAMOS EL TIPO AQUÍ
                           ignoreTareaValidation={true}
                           tareaMirrorValue={tareaText}
                           onSaved={async () => {
-                            // No bloquear por cambios de work_type/autosave, sólo refrescar
+                            // Refresca los datos en pantalla
                             await mutateMinute(undefined, { revalidate: true })
                           }}
                         />
@@ -509,10 +510,9 @@ export default function MinuteDetailPage() {
                         {/* Tipo de trabajo (label amigable) */}
                         <div className={ui.k}>Tipo de trabajo</div>
                         <div className={ui.v}>
-                          { (minute as any)?.work_type
+                          {(minute as any)?.work_type
                             ? WORK_TYPE_LABEL[(minute as any).work_type as keyof typeof WORK_TYPE_LABEL]
-                            : <span className={ui.muted}>—</span>
-                          }
+                            : <span className={ui.muted}>—</span>}
                         </div>
 
                         <div className={ui.k}>Tarea realizada</div>
