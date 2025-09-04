@@ -27,7 +27,8 @@ type MinuteId = string
 export interface MinuteFormProps {
   mode: 'create' | 'edit'
   minuteId?: MinuteId
-  initialValues?: Partial<FormValues>
+  /** Además de los campos del form, puedes pasar date para mostrarla en edición */
+  initialValues?: Partial<FormValues> & { date?: string | null }
   initialWorkType?: WorkType | null
   onSaved?: (minute: Minute) => void
   onCancel?: () => void
@@ -40,6 +41,23 @@ export interface MinuteFormProps {
 }
 
 const todayISO = () => new Date().toISOString().slice(0, 10)
+
+/** YYYY-MM-DD / ISO -> DD/MM/YYYY (tolerante) */
+function formatDateFriendly(input?: string | null): string {
+  if (!input) return ''
+  // Manejo directo de YYYY-MM-DD para evitar tz
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(input)
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`
+  // Fallback genérico
+  const d = new Date(input)
+  if (!Number.isNaN(d.getTime())) {
+    const dd = String(d.getDate()).padStart(2, '0')
+    const mm = String(d.getMonth() + 1).padStart(2, '0')
+    const yy = d.getFullYear()
+    return `${dd}/${mm}/${yy}`
+  }
+  return String(input)
+}
 
 export default function MinuteForm({
   mode,
@@ -248,6 +266,12 @@ export default function MinuteForm({
   }
   const fileNames = files.map((f) => f.name).join(', ')
 
+  // Fecha amigable (solo para mostrar en edición)
+  const friendlyDate = useMemo(
+    () => formatDateFriendly(initialValues?.date ?? null),
+    [initialValues?.date]
+  )
+
   return (
     <form
       className={`${ui.formGrid} ${saving ? ui.saving : ''}`}
@@ -269,6 +293,19 @@ export default function MinuteForm({
         </div>
       )}
 
+      {/* Fecha (solo mostrar en edición, readonly, formato DD/MM/YYYY) */}
+      {mode === 'edit' && friendlyDate && (
+        <div className={ui.field}>
+          <label className={ui.label}>Fecha</label>
+          <input
+            type="text"
+            value={friendlyDate}
+            readOnly
+            className={ui.input}
+          />
+        </div>
+      )}
+
       {/* Tipo de trabajo */}
       <div className={ui.field}>
         <label className={ui.label} htmlFor="work_type">
@@ -281,7 +318,7 @@ export default function MinuteForm({
             value={(workType as string) || ''}
             onChange={(e) => setWorkType(e.target.value as WorkType)}
             required={mode === 'create'}
-            disabled={workTypeReadOnly || lockWorkType} 
+            disabled={workTypeReadOnly || lockWorkType}
           >
             {mode === 'create' && <option value="" disabled>Selecciona una opción…</option>}
             {WORK_TYPE_OPTIONS.map((opt) => (
