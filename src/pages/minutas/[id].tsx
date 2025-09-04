@@ -1,264 +1,475 @@
-// src/pages/minutas/[id].tsx
+// src/pages/minutas/estadisticas.tsx
 /**
- * Detalle de minuta — con Pause/Resume basado en intervalos.
- * ============================================================================
- * Cambios clave (rol-admin + creador):
- * - Gating por roles con useRole (admin/super_admin = solo lectura).
- * - Admin ve el "Creador" (creator_display) en HERO y tarjeta.
- * - Se muestra y mantiene en edición el "Tipo de trabajo" (work_type).
+<<<<<<< Updated upstream
+ * Estadísticas mensuales (ADMIN) + Exportación CSV/XLSX con gráficos (imágenes).
+ * 🔒 Protegida por rol: admin | super_admin (RequireRole)
+ * - Se elimina cualquier guard por email; usamos gating por rol y RLS.
+ * - Excluye del conteo a usuarios de PRUEBAS (config por ENV).
+ *
+ * ENV relevantes:
+ * - NEXT_PUBLIC_LOGIN_DOMAIN: dominio de login local (por defecto 'login.local').
+ * - NEXT_PUBLIC_STATS_EXCLUDE_EMAILS: lista coma-separada de emails a EXCLUIR de estadísticas
+ *     EJ: "pruebas@login.local,qa1@login.local"
+ * - NEXT_PUBLIC_STATS_EXTRA_EMAILS: correos extra a incluir en tablero (además de los oficiales).
+ *
+ * Defensa en profundidad:
+ * - Filtro en BD: .in('created_by_email', ALLOWED_EMAILS) + .neq(...) por cada EXCLUIDO
+ * - Filtro en cliente: sanity-check para asegurar que excluidos no cuenten aunque cambie ALLOWED_EMAILS.
+=======
+ * Detalle de minuta (ADMIN vs USUARIO)
+ * -----------------------------------------------------------------------------
+ * - ADMIN: solo lectura + evidencias RO.
+ * - USUARIO (dueño): puede adjuntar evidencias y editar Novedades.
+ *
+ * ✅ “Tarea realizada”:
+ *   - Editor propio y controlado cuando end_time existe.
+ *   - Guardado con debounce a ambas columnas (tarea_realizada/description).
+ *   - Mirroring al MinuteForm para que su validación no falle.
+ *   - 🚫 Tras pulsar Guardar, el campo queda BLOQUEADO.
+ *
+ * Seguridad:
+ * - Admin se determina con `isAdmin(user)` (app_metadata.role==='admin') y
+ *   fallback por `NEXT_PUBLIC_ADMIN_EMAILS=correo1,correo2`.
+ * - Nunca se actualizan folio/folio_serial desde UI.
+>>>>>>> Stashed changes
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import Head from 'next/head'
+import dynamic from 'next/dynamic'
 import { useRouter } from 'next/router'
+<<<<<<< Updated upstream
+import {
+  Container, Row, Col, Card, Table, Form, Button, Badge, Modal, Spinner, Alert,
+} from 'react-bootstrap'
+import { FiArrowLeft, FiInfo } from 'react-icons/fi'
+import { supabase } from '@/lib/supabaseClient'
+import RequireRole from '@/components/RequireRole' // 🔒 GATING por rol
+
+// ---------- Recharts: dynamic con { default: ... } + ssr:false ----------
+const ResponsiveContainer = dynamic(
+  () => import('recharts').then(m => ({ default: m.ResponsiveContainer })), { ssr: false }
+)
+const ComposedChart = dynamic(
+  () => import('recharts').then(m => ({ default: m.ComposedChart })), { ssr: false }
+)
+const Bar = dynamic(
+  () => import('recharts').then(m => ({ default: m.Bar })), { ssr: false }
+)
+const Line = dynamic(
+  () => import('recharts').then(m => ({ default: m.Line })), { ssr: false }
+)
+const XAxis = dynamic(
+  () => import('recharts').then(m => ({ default: m.XAxis })), { ssr: false }
+)
+const YAxis = dynamic(
+  () => import('recharts').then(m => ({ default: m.YAxis })), { ssr: false }
+)
+const Tooltip = dynamic(
+  () => import('recharts').then(m => ({ default: (props: any) => <m.Tooltip {...props} /> })), { ssr: false }
+)
+const Legend = dynamic(
+  () => import('recharts').then(m => ({ default: (props: any) => <m.Legend {...props} /> })), { ssr: false }
+)
+const CartesianGrid = dynamic(
+  () => import('recharts').then(m => ({ default: m.CartesianGrid })), { ssr: false }
+)
+const PieChart = dynamic(
+  () => import('recharts').then(m => ({ default: m.PieChart })), { ssr: false }
+)
+const Pie = dynamic(
+  () => import('recharts').then(m => ({ default: m.Pie })), { ssr: false }
+)
+const Cell = dynamic(
+  () => import('recharts').then(m => ({ default: m.Cell })), { ssr: false }
+)
+
+// Tooltip con descripciones (cliente). Si no lo quieres, deja <Tooltip />
+const ChartTooltip = dynamic(
+  () => import('@/components/charts/ChartTooltip.client').then(m => ({ default: m.default })), { ssr: false }
+)
+
+// Paleta consistente
+const PALETTE = {
+  effective: '#3b82f6', // azul
+  expected:  '#94a3b8', // slate
+  rest:      '#9ca3af', // gray
+  idle:      '#f59e0b', // amber
+  donutBg:   '#e5e7eb',
+=======
 import useSWR from 'swr'
 import dayjs from 'dayjs'
-import { Container, Row, Col, Spinner, Alert, Card, Button, Badge } from 'react-bootstrap'
-import { FiHash, FiCalendar, FiClock, FiArrowLeft, FiPlay, FiPause, FiRotateCw, FiSquare, FiUser } from 'react-icons/fi'
+import {
+  Container, Row, Col, Spinner, Alert, Card, Button, Badge,
+} from 'react-bootstrap'
+import { FiHash, FiCalendar, FiClock, FiArrowLeft, FiPlay, FiSquare } from 'react-icons/fi'
 import { supabase } from '@/lib/supabaseClient'
-import { useAuth } from '@/contexts/AuthContext'
-import SessionGate from '@/components/SessionGate'
 import AttachmentsList from '@/components/AttachmentsList'
 import MinuteForm from '@/components/MinuteForm'
 import { resolveFolio } from '@/lib/folio'
+import { isAdmin as isAdminRole } from '@/lib/auth-roles'
 import ui from '@/styles/MinuteDetail.module.css'
 import userUi from '@/styles/MinuteFormUser.module.css'
 import LockTareaRealizada from '@/components/LockTareaRealizada'
-import { getMinuteByIdWithCreator, type MinuteWithCreator } from '@/lib/minutes'
-import { useRole } from '@/hooks/useRole'
-import { WORK_TYPE_LABEL } from '@/types/minute' // 👈 labels amigables de work_type
 
-type IntervalRow = {
+type MinuteRow = {
   id: string
-  minute_id: string
-  started_at: string // ISO
-  ended_at: string | null // ISO | null
+  date?: string | null
+  start_time?: string | null
+  end_time?: string | null
+  tarea_realizada?: string | null
+  novedades?: string | null
+  description?: string | null
+  notes?: string | null
+  user_id: string
+  folio?: string | number | null
+  folio_serial?: string | number | null
+>>>>>>> Stashed changes
 }
 
-/* ==================== Utils ==================== */
+const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
 
-/** Normaliza a HH:mm tanto ‘HH:mm’, ‘HH:mm:ss’ como ISO. */
-function toHHMM(value?: string | null): string {
-  if (!value) return ''
-  const s = String(value).trim()
-  const m = /^(\d{2}):(\d{2})(?::\d{2})?$/.exec(s)
-  if (m) return `${m[1]}:${m[2]}`
-  const d = dayjs(s)
-  return d.isValid() ? d.format('HH:mm') : ''
-}
+/* ============================================================================
+ * Lista de usuarios "oficiales" a mostrar en el tablero
+ *  ⚠️ NO incluimos al usuario de PRUEBAS aquí (se excluye abajo por ENV).
+ *  Puedes mantener esta lista estática y sumar adicionales por ENV si hace falta.
+ * ==========================================================================*/
+const USERS = [
+  { username: 'kat.acosta',   name: 'Katherine.A' },
+  { username: 'ivan.zamudio', name: 'Iván Zamudio' },
+  { username: 'audia.mesa',   name: 'Audia Mesa' },
+  { username: 'juan.diaz',    name: 'Juan Díaz' },
+  { username: 'kat.blades',   name: 'Katherine.B' },
+].map(u => ({ ...u, email: `${u.username}@${LOGIN_DOMAIN}`.toLowerCase() }))
 
-/** Hora actual en formato compatible con PG TIME. */
-function nowAsPgTime(): string { return dayjs().format('HH:mm:ss') }
-
-/** Formato humano para segundos totales. */
-function fmtDurationFromSeconds(totalSecs: number): string {
-  const secs = Math.max(0, Math.round(totalSecs))
-  const h = Math.floor(secs / 3600)
-  const m = Math.floor((secs % 3600) / 60)
-  const s = secs % 60
-  if (h > 0) return `${h}h ${m}m`
-  if (m > 0) return `${m}m`
-  return `${s}s`
-}
-
-/** Fallback para mostrar tarea: prioriza `tarea_realizada` y cae a `description`. */
-function tareaFrom(row?: MinuteWithCreator | null): string {
-  if (!row) return ''
-  return (row.tarea_realizada ?? (row as any).description ?? '') as string
-}
-
-/** Espeja al textarea interno del MinuteForm para pasar validaciones. */
-function mirrorTareaToMinuteForm(text: string) {
-  const nodes = document.querySelectorAll<HTMLTextAreaElement>(
-    'textarea[name="tareaRealizada"], textarea[name="tarea_realizada"]'
+/** Emails extra a incluir (por si agregas más staff sin tocar código) */
+const EXTRA_ALLOWED = Array.from(
+  new Set(
+    (process.env.NEXT_PUBLIC_STATS_EXTRA_EMAILS || '')
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean)
   )
-  nodes.forEach((el) => {
-    const proto = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
-    proto?.set?.call(el, text)
-    el.dispatchEvent(new Event('input', { bubbles: true }))
-  })
+)
+
+/** Emails a EXCLUIR del tablero (por defecto, el tester) */
+const STATS_EXCLUDE_EMAILS = Array.from(
+  new Set(
+    (process.env.NEXT_PUBLIC_STATS_EXCLUDE_EMAILS || 'pruebas@login.local')
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean)
+  )
+)
+
+/** Lista final de correos permitidos en consulta (sin los excluidos) */
+const ALLOWED_EMAILS = Array.from(
+  new Set([...USERS.map(u => u.email), ...EXTRA_ALLOWED])
+).filter(e => !STATS_EXCLUDE_EMAILS.includes(e))
+
+const LUNCH_MIN = 60
+const BREAK_MIN = 20
+const REST_PER_DAY_MIN = LUNCH_MIN + BREAK_MIN
+
+const NORMAL_IDLE_MIN = 30 // Tiempo muerto promedio/día
+const WEEKLY_HOURS = 44
+const WORKWEEK_DAYS = [1,2,3,4,5]
+
+// ------------- Utilidades de tiempo/fecha -------------
+const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`)
+
+function monthEdges(ym: string) {
+  const [y, m] = ym.split('-').map(Number)
+  const start = new Date(y, m - 1, 1)
+  const end = new Date(y, m, 0)
+  const toISO = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  return { start, end, startISO: toISO(start), endISO: toISO(end) }
 }
 
-/* ==================== Data ==================== */
-
-async function fetchIntervals(_key: string, minuteId: string): Promise<IntervalRow[]> {
-  const { data, error } = await supabase
-    .from('minute_interval')
-    .select('id, minute_id, started_at, ended_at')
-    .eq('minute_id', minuteId)
-    .order('started_at', { ascending: true })
-  if (error) throw new Error(error.message)
-  return (data ?? []) as IntervalRow[]
+function countBusinessDays(start: Date, end: Date, workDays = WORKWEEK_DAYS) {
+  let count = 0
+  const d = new Date(start)
+  while (d <= end) {
+    if (workDays.includes(d.getDay())) count++
+    d.setDate(d.getDate() + 1)
+  }
+  return count
 }
 
-function sumIntervalsSeconds(intervals: IntervalRow[]): number {
-  return intervals.reduce((acc, it) => {
-    const start = dayjs(it.started_at)
-    const end = it.ended_at ? dayjs(it.ended_at) : dayjs()
-    const secs = Math.max(0, end.diff(start, 'second'))
-    return acc + secs
-  }, 0)
+function parseTimeToMin(t?: string | null): number | null {
+  if (!t) return null
+  const [h, m, s] = t.split(':').map(Number)
+  const mm = (h || 0) * 60 + (m || 0) + Math.floor((s || 0) / 60)
+  return Number.isFinite(mm) ? mm : null
 }
 
-/* ==================== Page ==================== */
+function diffMin(start?: string | null, end?: string | null): number {
+  const a = parseTimeToMin(start)
+  const b = parseTimeToMin(end)
+  if (a == null || b == null || b <= a) return 0
+  return b - a
+}
 
-export default function MinuteDetailPage() {
+<<<<<<< Updated upstream
+function minToHhmm(min: number) {
+  const sign = min < 0 ? '-' : ''
+  const M = Math.abs(min)
+  const hh = Math.floor(M / 60)
+  const mm = M % 60
+  return `${sign}${pad(hh)}:${pad(mm)}`
+=======
+/* ==================== UX helpers ==================== */
+function useFocusTimerOnHash() {
+  useEffect(() => {
+    if (typeof window === 'undefined' || window.location.hash !== '#timer') return
+    const t = window.setTimeout(() => {
+      const root = document.getElementById('timer')
+      root?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      const startBtn = document.getElementById('timer-start-btn') as HTMLButtonElement | null
+      startBtn?.focus()
+    }, 60)
+    return () => window.clearTimeout(t)
+  }, [])
+>>>>>>> Stashed changes
+}
+
+// ---------------- Tipos ----------------
+type MinuteRow = {
+  user_id: string | null
+  created_by_email: string | null
+  created_by_name: string | null
+  date: string | null
+  start_time: string | null
+  end_time: string | null
+}
+
+type UserAgg = {
+  email: string
+  name: string
+  daysWithLogs: number
+  grossMin: number
+  restMin: number
+  netMin: number
+  idleMin: number
+  effectiveMin: number
+  byDay: Array<{
+    date: string
+    grossMin: number
+    restMin: number
+    netMin: number
+    idleMin: number
+    effectiveMin: number
+  }>
+}
+
+// Tipos auxiliares para mapas
+type DayMinutesMap = Map<string, number>;
+type PerUserPerDay = Map<string, DayMinutesMap>;
+
+// --- Ayuda de interpretación ---
+function MetricHelp() {
+  return (
+    <ul style={{ display: 'grid', gap: 8, marginTop: 8, fontSize: 12, opacity: 0.9 }}>
+      <li><strong>Bruto:</strong> Tiempo total entre inicio y fin por día, sin descuentos.</li>
+      <li><strong>Descansos:</strong> Bloque fijo diario: 1h 20m (almuerzo + pausas).</li>
+      <li><strong>Tiempo muerto (promedio):</strong> Tolerancia diaria promedio (30m) para transiciones/interrupciones.</li>
+      <li><strong>Efectivo:</strong> Bruto – Descansos – Tiempo muerto (nunca negativo).</li>
+      <li><strong>Meta:</strong> Objetivo mensual derivado de 44h/semana.</li>
+    </ul>
+  )
+}
+
+/* ===================== CSV UTILS ===================== */
+function csvEscape(val: unknown, sep = ','): string {
+  const s = String(val ?? '')
+  const needsQuotes = s.includes('"') || s.includes('\n') || s.includes(sep)
+  const escaped = s.replace(/"/g, '""')
+  return needsQuotes ? `"${escaped}"` : escaped
+}
+function downloadCsvFile(filename: string, headers: string[], rows: (string | number)[][], sep = ',') {
+  const lines: string[] = []
+  lines.push(`sep=${sep}`)
+  lines.push(headers.join(sep))
+  for (const r of rows) lines.push(r.map(v => csvEscape(v, sep)).join(sep))
+  const csv = '\uFEFF' + lines.join('\r\n')
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  setTimeout(() => URL.revokeObjectURL(url), 500)
+}
+/* ===================================================== */
+
+export default function AdminEstadisticasPage() {
   const router = useRouter()
-  const { id } = router.query as { id?: string }
-  const { status, user } = useAuth()
-  const userId = user?.id ?? null
+  const [ym, setYm] = useState<string>(() => {
+    const d = new Date()
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`
+  })
+  const { start, end, startISO, endISO } = monthEdges(ym)
 
-  // 🔐 Roles: worker escribe; admin/super_admin solo lectura
-  const { loading: roleLoading, canWriteMinutes } = useRole()
-  const isAdminRole = !roleLoading && !canWriteMinutes
+  const businessDays = useMemo(() => countBusinessDays(start, end), [ym])
+  const expectedPerDayMin = Math.round((WEEKLY_HOURS / WORKWEEK_DAYS.length) * 60)
+  const expectedPerDayEffectiveMin = Math.max(0, expectedPerDayMin - NORMAL_IDLE_MIN)
+  const expectedMonthEffectiveMin = businessDays * expectedPerDayEffectiveMin
 
-  // ⬇️ Minuta con creator_display (usa tipo correcto en SWR)
-  const minuteKey = id && status === 'authenticated' ? (['minute-with-creator', id] as const) : null
-  const { data: minute, isLoading: isMinuteLoading, error: minuteError, mutate: mutateMinute } =
-    useSWR<MinuteWithCreator | null>(
-      minuteKey,
-      ([_tag, theId]) => getMinuteByIdWithCreator(String(theId)),
-      { revalidateOnFocus: false }
-    )
-
-  // Intervals
-  const intervalsKey = id && status === 'authenticated' ? (['intervals', id] as const) : null
-  const { data: intervals, isLoading: isIntervalsLoading, error: intervalsError, mutate: mutateIntervals } =
-    useSWR<IntervalRow[]>(
-      intervalsKey,
-      ([_tag, theId]) => fetchIntervals(String(_tag), String(theId)),
-      { revalidateOnFocus: true }
-    )
-
-  // Estado derivado
-  const isOwner = useMemo(() => !!minute && !!userId && minute.user_id === userId, [minute, userId])
-  const hasStarted = useMemo(() => (intervals?.length ?? 0) > 0 || !!minute?.start_time, [intervals, minute?.start_time])
-  const hasEnded = useMemo(() => !!minute?.end_time, [minute?.end_time])
-  const activeInterval = useMemo(() => (intervals ?? []).find(it => it.ended_at === null) ?? null, [intervals])
-  const isRunning = useMemo(() => !!activeInterval && !hasEnded, [activeInterval, hasEnded])
-  const isPaused = useMemo(() => hasStarted && !isRunning && !hasEnded, [hasStarted, isRunning, hasEnded])
-
-  const totalSeconds = useMemo(() => sumIntervalsSeconds(intervals ?? []), [intervals])
-  const durationHuman = fmtDurationFromSeconds(totalSeconds)
-
-  // Tarea realizada (igual que antes)
-  const tareaValueServer = useMemo(() => tareaFrom(minute), [minute])
-  const [tareaText, setTareaText] = useState<string>('')
-  const [saveState, setSaveState] = useState<'idle'|'saving'|'saved'|'error'>('idle')
-  const saveTimer = useRef<number | null>(null)
-  const [tareaLocked, setTareaLocked] = useState(false)
-
+<<<<<<< Updated upstream
+  // Nudge de “filtra por mes”
+  const [showNudge, setShowNudge] = useState(true)
   useEffect(() => {
-    const initial = tareaValueServer ?? ''
-    setTareaText(initial)
-    setSaveState('idle')
-    mirrorTareaToMinuteForm(initial)
-    setTareaLocked(false)
-  }, [minute?.id, tareaValueServer])
+    const t = setTimeout(() => setShowNudge(false), 6000)
+    const onScroll = () => setShowNudge(false)
+    window.addEventListener('scroll', onScroll, { once: true })
+    return () => { clearTimeout(t); window.removeEventListener('scroll', onScroll) }
+  }, [])
 
-  // Fallback: ocultar inputs time del MinuteForm
+  const [loading, setLoading] = useState(false)
+  const [rows, setRows] = useState<MinuteRow[]>([])
+  const [error, setError] = useState<string | null>(null)
+  const [show, setShow] = useState(false)
+  const [detail, setDetail] = useState<UserAgg | null>(null)
+=======
+  // sesión (user completo para isAdmin)
+  const [sessionUser, setSessionUser] = useState<any>(null)
+  const [sessionUserId, setSessionUserId] = useState<string | null>(null)
   useEffect(() => {
-    const scope = document.querySelector(`.${userUi.userFormScope}`)
-    if (!scope) return
-    scope.querySelectorAll('input[type="time"]').forEach((el) => {
-      const inp = el as HTMLInputElement
-      inp.disabled = true
-      inp.readOnly = true
-      inp.setAttribute('aria-hidden', 'true')
-      ;(inp.style as any).display = 'none'
-    })
-  }, [minute?.id])
+    let alive = true
+    ;(async () => {
+      const { data } = await supabase.auth.getUser()
+      if (!alive) return
+      // garantizamos token fresco para traer app_metadata.role si hace falta
+      await supabase.auth.refreshSession().catch(() => {})
+      const fresh = await supabase.auth.getUser()
+      const user = fresh.data.user ?? data.user ?? null
+      if (!alive) return
+      setSessionUser(user)
+      setSessionUserId(user?.id ?? null)
+    })()
+    return () => { alive = false }
+  }, [])
 
-  // Acciones Start/Pause/Resume/Stop
-  const [opErr, setOpErr] = useState<string | null>(null)
-  const [opLoading, setOpLoading] = useState<'start' | 'pause' | 'resume' | 'stop' | null>(null)
+  const isAdmin = useMemo(() => (sessionUser ? isAdminRole(sessionUser) : false), [sessionUser])
+  const isOwner = useMemo(
+    () => !!minute && !!sessionUserId && minute.user_id === sessionUserId,
+    [minute, sessionUserId]
+  )
+>>>>>>> Stashed changes
 
-  async function doRefresh() {
-    await Promise.all([mutateIntervals(), mutateMinute()])
-  }
+  // Refs para exportar imágenes de los dos gráficos del modal
+  const chartDailyRef = useRef<HTMLDivElement | null>(null)
+  const donutRef = useRef<HTMLDivElement | null>(null)
 
-  function nowIso() { return new Date().toISOString() }
+  // Fetch mensual SOLO de la lista blanca y excluyendo testers
+  useEffect(() => {
+    setLoading(true)
+    setError(null)
+    ;(async () => {
+      try {
+        // ⚠️ Si por algún motivo la lista queda vacía, no hagas query abierta
+        if (ALLOWED_EMAILS.length === 0) {
+          setRows([])
+          return
+        }
 
-  async function handleStartOrResume(kind: 'start' | 'resume') {
-    if (!id || !isOwner || hasEnded || opLoading) return
-    setOpErr(null); setOpLoading(kind)
-    try {
-      await supabase
-        .from('minute_interval')
-        .update({ ended_at: nowIso() })
-        .eq('minute_id', id)
-        .is('ended_at', null)
+        let q = supabase
+          .from('minute')
+          .select('user_id, created_by_email, created_by_name, date, start_time, end_time')
+          .gte('date', startISO)
+          .lte('date', endISO)
+          .in('created_by_email', ALLOWED_EMAILS)
+          .order('date', { ascending: true })
+          .order('start_time', { ascending: true })
 
-      const ins = await supabase
-        .from('minute_interval')
-        .insert({ minute_id: id })
-        .select('id')
-        .single()
+        // Exclusión explícita (por si EXTRA_ALLOWED trae un tester por error)
+        for (const ex of STATS_EXCLUDE_EMAILS) {
+          q = q.neq('created_by_email', ex)
+        }
 
-      if (ins.error && ins.error.code !== '23505') throw ins.error
-      if (!minute?.start_time) {
-        await supabase.from('minute')
-          .update({ start_time: nowAsPgTime(), end_time: null })
-          .eq('id', id)
+        const { data, error } = await q
+        if (error) throw error
+
+        // Filtro defensivo en cliente (case-insensitive)
+        const rowsSafe = (data ?? []).filter(r => {
+          const mail = (r?.created_by_email || '').toLowerCase()
+          return ALLOWED_EMAILS.includes(mail) && !STATS_EXCLUDE_EMAILS.includes(mail)
+        })
+
+        setRows(rowsSafe as MinuteRow[])
+      } catch (e: any) {
+        setError(e?.message ?? 'No se pudieron cargar las minutas.')
+      } finally {
+        setLoading(false)
       }
-      await doRefresh()
-    } catch (e: any) {
-      setOpErr(e?.message || 'No se pudo iniciar/reanudar.')
-    } finally {
-      setOpLoading(null)
+    })()
+  }, [startISO, endISO])
+
+  // Agregación por usuario (solo los oficiales en USERS)
+  const dataByUser: UserAgg[] = useMemo(() => {
+    const base: Record<string, UserAgg> = {}
+    for (const u of USERS) {
+      base[u.email] = {
+        email: u.email, name: u.name,
+        daysWithLogs: 0, grossMin: 0, restMin: 0, netMin: 0, idleMin: 0, effectiveMin: 0,
+        byDay: [],
+      }
     }
-  }
 
-  async function handlePause() {
-    if (!id || !isOwner || !isRunning || opLoading) return
-    setOpErr(null); setOpLoading('pause')
-    try {
-      const { error } = await supabase
-        .from('minute_interval')
-        .update({ ended_at: nowIso() })
-        .eq('minute_id', id)
-        .is('ended_at', null)
-      if (error) throw error
-      await doRefresh()
-    } catch (e: any) {
-      setOpErr(e?.message || 'No se pudo pausar.')
-    } finally {
-      setOpLoading(null)
+    // email -> (date -> grossMin)
+    const perUserPerDay: PerUserPerDay = new Map()
+
+    for (const r of rows) {
+      const email = (r.created_by_email ?? '').toLowerCase()
+      if (!email || !(email in base)) continue // Ignora todo lo que no está en USERS (incluye testers)
+      if (STATS_EXCLUDE_EMAILS.includes(email)) continue // defensa extra (no debería entrar por filtros)
+
+      const date = r.date ?? ''
+      if (!date) continue
+
+      const dur = diffMin(r.start_time, r.end_time)
+      if (dur <= 0) continue
+
+      let mapDay = perUserPerDay.get(email)
+      if (!mapDay) {
+        mapDay = new Map<string, number>()
+        perUserPerDay.set(email, mapDay)
+      }
+      mapDay.set(date, (mapDay.get(date) ?? 0) + dur)
     }
-  }
 
-  async function handleStop() {
-    if (!id || !isOwner || hasEnded || opLoading) return
-    setOpErr(null); setOpLoading('stop')
-    try {
-      await supabase
-        .from('minute_interval')
-        .update({ ended_at: nowIso() })
-        .eq('minute_id', id)
-        .is('ended_at', null)
+<<<<<<< Updated upstream
+    for (const u of USERS) {
+      const dayMap: DayMinutesMap = perUserPerDay.get(u.email) ?? new Map<string, number>()
 
-      const { error: updErr } = await supabase
-        .from('minute')
-        .update({ end_time: nowAsPgTime() })
-        .eq('id', id)
-      if (updErr) throw updErr
+      const days: [string, number][] = Array.from(dayMap.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]))
 
-      await doRefresh()
+      let gross = 0, rest = 0, net = 0, idle = 0, eff = 0
+      const byDay: UserAgg['byDay'] = []
 
-      window.setTimeout(() => {
-        const el = document.querySelector<HTMLElement>(
-          'textarea[name="tareaRealizada"], textarea[name="tarea_realizada"]'
-        )
-        el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-        el?.focus()
-      }, 120)
-    } catch (e: any) {
-      setOpErr(e?.message || 'No se pudo detener.')
-    } finally {
-      setOpLoading(null)
-    }
-  }
+      for (const [d, g] of days) {
+        const restD = g > 0 ? REST_PER_DAY_MIN : 0
+        const netD  = Math.max(0, g - restD)
+        const idleD = netD > 0 ? Math.min(netD, NORMAL_IDLE_MIN) : 0
+        const effD  = Math.max(0, netD - idleD)
 
-  // Guardado “tarea realizada” (debounce)
+        gross += g; rest += restD; net += netD; idle += idleD; eff += effD
+        byDay.push({ date: d, grossMin: g, restMin: restD, netMin: netD, idleMin: idleD, effectiveMin: effD })
+      }
+
+      base[u.email].daysWithLogs = days.length
+      base[u.email].grossMin = gross
+      base[u.email].restMin = rest
+      base[u.email].netMin = net
+      base[u.email].idleMin = idle
+      base[u.email].effectiveMin = eff
+      base[u.email].byDay = byDay
+=======
+  // guardar tarea (debounced) — actualiza ambas columnas
   async function persistTarea(text: string) {
     if (!id) return
     const { error } = await supabase
@@ -266,12 +477,8 @@ export default function MinuteDetailPage() {
       .update({ tarea_realizada: text, description: text })
       .eq('id', id)
     if (error) throw error
-    await mutateMinute(
-      (curr) => (curr ? ({ ...curr, tarea_realizada: text } as MinuteWithCreator) : curr),
-      { revalidate: false }
-    )
+    await mutate({ ...(minute as MinuteRow), tarea_realizada: text, description: text }, { revalidate: false })
   }
-
   function scheduleSave(text: string, delay = 800) {
     if (tareaLocked) return
     setSaveState('saving')
@@ -296,254 +503,587 @@ export default function MinuteDetailPage() {
     }
     if (!tareaLocked && saveState === 'saving') {
       try { await persistTarea(tareaText); setSaveState('saved') } catch { setSaveState('error') }
+>>>>>>> Stashed changes
     }
+
+    return Object.values(base).sort((a,b) => a.name.localeCompare(b.name))
+  }, [rows])
+
+  const overviewChart = useMemo(() => {
+    return dataByUser.map(u => ({
+      name: u.name.split(' ')[0],
+      effectiveH: +(u.effectiveMin / 60).toFixed(2),
+      expectedH:  +((expectedMonthEffectiveMin) / 60).toFixed(2),
+    }))
+  }, [dataByUser, expectedMonthEffectiveMin])
+
+  const detailDailyChart = useMemo(() => {
+    if (!detail) return []
+    return detail.byDay.map(d => ({
+      date: d.date.slice(5),
+      restH: +(d.restMin / 60).toFixed(2),
+      idleH: +(d.idleMin / 60).toFixed(2),
+      effectiveH: +(d.effectiveMin / 60).toFixed(2),
+    }))
+  }, [detail])
+
+  const pct = (effMin: number) =>
+    expectedMonthEffectiveMin > 0 ? Math.round((effMin / expectedMonthEffectiveMin) * 100) : 0
+
+  /* ===================== EXPORT HANDLERS ===================== */
+  const onExportMonthlyCsv = () => {
+    const headers = [
+      'Usuario','Email','Días con registros','Bruto (HH:MM)','Descansos (HH:MM)',
+      'Tiempo muerto (promedio) (HH:MM)','Efectivo (HH:MM)','Meta mes efectiva (HH:MM)','Cumplimiento (%)',
+    ]
+    const rowsCsv = dataByUser.map(u => [
+      u.name, u.email, u.daysWithLogs,
+      minToHhmm(u.grossMin), minToHhmm(u.restMin), minToHhmm(u.idleMin),
+      minToHhmm(u.effectiveMin), minToHhmm(expectedMonthEffectiveMin), pct(u.effectiveMin),
+    ])
+    downloadCsvFile(`resumen-mensual_${ym}.csv`, headers, rowsCsv)
   }
-  useEffect(() => () => { if (saveTimer.current) window.clearTimeout(saveTimer.current) }, [])
 
-  // Render de estados iniciales/errores
-  if (!id) {
-    return (
-      <SessionGate requireAuth>
-        <Container className="py-4"><Alert variant="warning">ID de minuta no especificado.</Alert></Container>
-      </SessionGate>
-    )
-  }
-  if (minuteError || intervalsError) {
-    return (
-      <SessionGate requireAuth>
-        <Container className="py-4"><Alert variant="danger">No se pudo cargar la minuta: {String((minuteError as any)?.message || minuteError || intervalsError)}</Alert></Container>
-      </SessionGate>
-    )
+  const onExportDetailCsv = () => {
+    if (!detail) return
+    const headers = ['Fecha','Bruto (HH:MM)','Descansos (HH:MM)','Tiempo muerto (promedio) (HH:MM)','Efectivo (HH:MM)']
+    const rowsCsv = detail.byDay.map(d => [
+      d.date, minToHhmm(d.grossMin), minToHhmm(d.restMin), minToHhmm(d.idleMin), minToHhmm(d.effectiveMin),
+    ])
+    downloadCsvFile(`detalle_${detail.name.replace(/\s+/g, '')}_${ym}.csv`, headers, rowsCsv)
   }
 
-  const { display: folioText } = resolveFolio({
-    id: minute?.id ?? '',
-    folio: (minute as any)?.folio,
-    folio_serial: (minute as any)?.folio_serial,
-  })
-  const dateStr = minute?.date ? dayjs(minute.date).format('DD/MM/YYYY') : '—'
-  const timeStr = `${toHHMM(minute?.start_time) || '—'} — ${toHHMM(minute?.end_time) || '—'}`
+  // Exportar detalle diario (XLSX) con ambos gráficos como imágenes (robusto)
+  const onExportDetailXlsx = async () => {
+    if (!detail) return
 
-  // 🔒 Sólo el dueño y que además sea worker (no admin) puede editar
-  const showOwnerEdit = !!minute && !!userId && minute.user_id === userId && !isAdminRole
-  const canEditTarea = showOwnerEdit && !!minute?.end_time && !tareaLocked
+    const { toPng } = await import('html-to-image')
+    // @ts-ignore: build browser
+    const exceljsMod = await import('exceljs/dist/exceljs.min.js')
+    const ExcelJS: any = (exceljsMod as any).default ?? exceljsMod
 
-  const statusBadge = hasEnded
-    ? { text: 'Finalizado', variant: 'secondary' as const }
-    : isRunning
-      ? { text: 'En curso', variant: 'warning' as const }
-      : hasStarted
-        ? { text: 'En pausa', variant: 'info' as const }
-        : { text: 'Sin iniciar', variant: 'secondary' as const }
+    const dailyNode = chartDailyRef.current
+    const donutNode = donutRef.current
+    if (!dailyNode || !donutNode) return
+
+    await new Promise(r => setTimeout(r, 150))
+
+    const capture = async (node: HTMLElement) => {
+      try {
+        return await toPng(node, {
+          pixelRatio: 2,
+          backgroundColor: '#ffffff',
+          cacheBust: true,
+          skipFonts: true,
+          filter: (n: any) => n.tagName !== 'IFRAME' && n.tagName !== 'LINK' && n.tagName !== 'SCRIPT',
+        })
+      } catch (e) {
+        console.error('toPng failed', e)
+        return ''
+      }
+    }
+
+    const [dailyPng, donutPng] = await Promise.all([capture(dailyNode), capture(donutNode)])
+    if (!dailyPng || !donutPng) {
+      alert('No se pudieron capturar las imágenes de los gráficos. Revisa CORS/CSS externos.')
+      return
+    }
+
+    const wb = new ExcelJS.Workbook()
+    wb.creator = 'Minuta Digital'
+    const wsCharts = wb.addWorksheet('Gráficos')
+    const wsDetail = wb.addWorksheet('Detalle diario')
+
+    const dRect = dailyNode.getBoundingClientRect()
+    const oRect = donutNode.getBoundingClientRect()
+
+    const img1 = wb.addImage({ base64: dailyPng.replace(/^data:image\/png;base64,/, ''), extension: 'png' })
+    const img2 = wb.addImage({ base64: donutPng.replace(/^data:image\/png;base64,/, ''), extension: 'png' })
+
+    wsCharts.mergeCells('A1:D1')
+    wsCharts.getCell('A1').value = `Detalle — ${detail.name} (${ym})`
+    wsCharts.getCell('A1').font = { bold: true, size: 14 }
+
+    wsCharts.addImage(img1, { tl: { col: 0, row: 1 },  ext: { width: Math.round(dRect.width), height: Math.round(dRect.height) } })
+    wsCharts.addImage(img2, { tl: { col: 0, row: 22 }, ext: { width: Math.round(oRect.width), height: Math.round(oRect.height) } })
+
+    wsDetail.columns = [
+      { header: 'Fecha', width: 12 },
+      { header: 'Bruto (HH:MM)', width: 16 },
+      { header: 'Descansos (HH:MM)', width: 20 },
+      { header: 'Tiempo muerto (promedio) (HH:MM)', width: 30 },
+      { header: 'Efectivo (HH:MM)', width: 18 },
+    ]
+    detail.byDay.forEach(d => {
+      wsDetail.addRow([
+        d.date,
+        minToHhmm(d.grossMin),
+        minToHhmm(d.restMin),
+        minToHhmm(d.idleMin),
+        minToHhmm(d.effectiveMin),
+      ])
+    })
+    wsDetail.getRow(1).font = { bold: true }
+
+    const buffer = await wb.xlsx.writeBuffer()
+    const blob = new Blob([buffer], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `detalle_${detail.name.replace(/\s+/g, '')}_${ym}.xlsx`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 500)
+  }
+  /* ============================================================ */
 
   return (
-    <SessionGate requireAuth>
-      <Container className={ui.wrapper}>
-        {(status === 'loading' || isMinuteLoading || isIntervalsLoading || roleLoading) && (
-          <div className="py-4 d-flex align-items-center gap-2"><Spinner animation="border" size="sm" /><span>Cargando…</span></div>
-        )}
+    <RequireRole allow={['admin','super_admin']}>
+      <Head><title>Estadísticas mensuales — Admin</title></Head>
 
-        {minute && (
-          <>
-            {/* HERO */}
-            <div className={ui.hero}>
-              <div className={ui.heroContent}>
-                <div className={ui.breadcrumb}>
-                  <Button variant="link" size="sm" className={ui.backBtn} onClick={() => router.back()} aria-label="Volver">
-                    <FiArrowLeft /> Volver
-                  </Button>
-                </div>
+      <Container className="py-4">
+        {/* Volver + Título + Selector Mes con Nudge */}
+        <Row className="align-items-center mb-3">
+          <Col className="d-flex align-items-center gap-3">
+            {/* Botón Volver estilizado */}
+            <button
+              type="button"
+              className="backBtn"
+              onClick={() => router.back()}
+              aria-label="Volver"
+            >
+              <FiArrowLeft /> Volver
+            </button>
 
-                <div className={ui.titleRow}>
-                  <h1 className={ui.title}>Detalle de minuta</h1>
-                  <span className={ui.folioPill}><FiHash /> {folioText}</span>
-                </div>
-
-                <div className={ui.meta}>
-                  <span className={ui.metaItem}><FiCalendar /> {dateStr}</span>
-                  <span className={ui.metaItem}><FiClock /> {timeStr}</span>
-
-                  {/* ADMIN/SUPER_ADMIN: mostrar Creador resuelto */}
-                  {isAdminRole && (
-                    <span className={ui.metaItem} title="Creador de la minuta">
-                      <FiUser /> {minute.creator_display ?? '—'}
-                    </span>
-                  )}
-                </div>
-              </div>
+            <div>
+              <h1 className="h3 m-0">Estadísticas mensuales</h1>
+              <div className="text-muted">Resumen con descansos y tiempo muerto promedio descontados</div>
             </div>
+          </Col>
 
-            {/* CONTENIDO */}
-            <Row className={ui.grid}>
-              <Col lg={7} className="d-flex flex-column gap-3">
-                {/* === TIMER ========================================================= */}
-                <Card className={ui.card} id="timer" aria-label="Cronómetro">
-                  <Card.Header className={ui.cardHeader}>
-                    <span>Tiempo</span>
-                    <Badge bg={statusBadge.variant} className={ui.badgePill}>
-                      {statusBadge.text}
-                    </Badge>
-                  </Card.Header>
-                  <Card.Body className="d-flex flex-column gap-2">
-                    <div className="d-flex align-items-center gap-3">
-                      <div><FiClock /> <strong>Duración:</strong> {durationHuman}</div>
-                      <div className="text-muted small">({timeStr})</div>
-                    </div>
+          <Col xs="12" md="auto" className="d-flex align-items-end gap-3 mt-3 mt-md-0">
+            {showNudge && (
+              <div className="stats-nudge" aria-live="polite">
+                <span className="pulse" aria-hidden />
+                <span className="tip">
+                  <FiInfo style={{ marginRight: 6 }} aria-hidden />
+                  Tip: filtra por <strong>mes</strong>
+                </span>
+                <span className="arrow" aria-hidden>➡</span>
+              </div>
+<<<<<<< Updated upstream
+=======
 
-                    {/* Controles del tiempo */}
-                    {showOwnerEdit ? (
-                      <div className="d-flex flex-wrap gap-2">
-                        {!hasStarted && !hasEnded && (
-                          <Button id="timer-start-btn" variant="success" onClick={() => handleStartOrResume('start')} disabled={opLoading !== null}>
-                            {opLoading === 'start' ? <Spinner animation="border" size="sm" /> : <><FiPlay /> Start</>}
-                          </Button>
-                        )}
-
-                        {isRunning && !hasEnded && (
-                          <Button variant="warning" onClick={handlePause} disabled={opLoading !== null}>
-                            {opLoading === 'pause' ? <Spinner animation="border" size="sm" /> : <><FiPause /> Pause</>}
-                          </Button>
-                        )}
-
-                        {isPaused && !hasEnded && (
-                          <Button variant="success" onClick={() => handleStartOrResume('resume')} disabled={opLoading !== null}>
-                            {opLoading === 'resume' ? <Spinner animation="border" size="sm" /> : <><FiRotateCw /> Resume</>}
-                          </Button>
-                        )}
-
-                        {hasStarted && !hasEnded && (
-                          <Button variant="danger" onClick={handleStop} disabled={opLoading !== null}>
-                            {opLoading === 'stop' ? <Spinner animation="border" size="sm" /> : <><FiSquare /> Stop</>}
-                          </Button>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="text-muted small">Solo lectura.</div>
-                    )}
-
-                    {opErr && <Alert className="mt-2 mb-0" variant="danger">{opErr}</Alert>}
-                  </Card.Body>
-                </Card>
-                {/* === FIN TIMER ===================================================== */}
-
-                <Card className={ui.card}>
-                  <Card.Header className={ui.cardHeader}>
-                    <span>Información básica</span>
-                    <Badge bg="light" text="dark" title="Folio">#{folioText}</Badge>
-                  </Card.Header>
-
-                  {showOwnerEdit ? (
-                    <Card.Body className={`${userUi.userFormScope} ${minute.end_time ? userUi.unlockTarea : ''}`}>
-                      {/* Lock visual del campo interno */}
-                      <LockTareaRealizada />
-
-                      {/* Editor propio (mínimo ruido; bloqueo tras guardar final) */}
-                      {(!tareaLocked && !!minute.end_time) && (
-                        <div className="mb-3">
-                          <label className="form-label">Tarea realizada</label>
-                          <textarea
-                            name="tareaRealizada"
-                            className="form-control"
-                            rows={6}
-                            placeholder="Describe lo que realizaste…"
-                            value={tareaText}
-                            onChange={onTareaChange}
-                            onBlur={onTareaBlur}
-                            disabled={!canEditTarea}
-                          />
-                          <div className="form-text">
-                            {saveState === 'saving' && 'Guardando…'}
-                            {saveState === 'saved' && 'Guardado ✓'}
-                            {saveState === 'error' && 'No se pudo guardar. Reintenta.'}
-                          </div>
-                        </div>
-                      )}
-
-                      {/* MinuteForm para resto de campos (oculto tarea/horas) */}
-                      <div className="mm-hide-tarea mm-hide-hours">
-                        <MinuteForm
-                          mode="edit"
-                          minuteId={minute.id}
-                          onCancel={() => router.back()}
-                          requireAttachmentOnCreate={false}
-                          enableAutosave={true}
-                          autosaveDelayMs={800}
-                          initialValues={{
-                            tarea_realizada: tareaValueServer,
-                            novedades: (minute as any).novedades ?? '',
-                          }}
-                          initialWorkType={(minute as any).work_type ?? null}   // 👈 PASAMOS EL TIPO AQUÍ
-                          ignoreTareaValidation={true}
-                          tareaMirrorValue={tareaText}
-                          onSaved={async () => {
-                            // Refresca los datos en pantalla
-                            await mutateMinute(undefined, { revalidate: true })
-                          }}
-                        />
-                      </div>
-
-                      {/* CSS local para ocultar el campo duplicado del MinuteForm y horas */}
-                      <style jsx>{`
-                        .mm-hide-tarea :global(label[for="tarea"]),
-                        .mm-hide-tarea :global(#tarea) { display: none !important; }
-                        .mm-hide-hours :global(input[type="time"]) { display: none !important; }
-                        .mm-hide-hours :global(label[for="start_time"]),
-                        .mm-hide-hours :global(label[for="end_time"]) { display: none !important; }
-                      `}</style>
-                    </Card.Body>
-                  ) : (
-                    <Card.Body>
-                      <div className={ui.kvGrid} aria-label="Resumen de campos">
-                        <div className={ui.k}><FiCalendar /> Fecha</div>
-                        <div className={ui.v}>{dateStr}</div>
-                        <div className={ui.k}><FiClock /> Horario</div>
-                        <div className={ui.v}>{timeStr}</div>
-
-                        {/* ADMIN/SUPER_ADMIN: mostrar creador también en la tarjeta */}
-                        {isAdminRole && (
-                          <>
-                            <div className={ui.k}><FiUser /> Creador</div>
-                            <div className={ui.v}>{minute.creator_display ?? <span className={ui.muted}>—</span>}</div>
-                          </>
-                        )}
-
-                        {/* Tipo de trabajo (label amigable) */}
-                        <div className={ui.k}>Tipo de trabajo</div>
-                        <div className={ui.v}>
-                          {(minute as any)?.work_type
-                            ? WORK_TYPE_LABEL[(minute as any).work_type as keyof typeof WORK_TYPE_LABEL]
-                            : <span className={ui.muted}>—</span>}
-                        </div>
-
-                        <div className={ui.k}>Tarea realizada</div>
-                        <div className={ui.v}>{tareaValueServer || <span className={ui.muted}>—</span>}</div>
-                        <div className={ui.k}>Novedades</div>
-                        <div className={ui.v}>{(minute as any).novedades || <span className={ui.muted}>—</span>}</div>
-                      </div>
-                    </Card.Body>
+              {/* ⏯️ Controles Start/Stop (solo dueño) */}
+              {showOwnerEdit ? (
+                <div className="d-flex gap-2">
+                  {!minute.start_time && (
+                    <Button id="timer-start-btn" variant="success" onClick={handleStart} disabled={opLoading !== null}>
+                      {opLoading === 'start' ? <Spinner animation="border" size="sm" /> : <><FiPlay /> Start</>}
+                    </Button>
                   )}
-                </Card>
-              </Col>
+                  {!!minute.start_time && !minute.end_time && (
+                    <Button variant="danger" onClick={handleStop} disabled={opLoading !== null}>
+                      {opLoading === 'stop' ? <Spinner animation="border" size="sm" /> : <><FiSquare /> Stop</>}
+                    </Button>
+                  )}
+                </div>
+              ) : (
+                <div className="text-muted small">Solo lectura.</div>
+              )}
 
-              <Col lg={5} className="d-flex flex-column gap-3">
-                <Card className={ui.card}>
-                  <Card.Header className={ui.cardHeader}>
-                    <span>Evidencias</span>
-                    {showOwnerEdit ? (
-                      <Badge bg="primary" className={ui.badgePill}>Habilitadas</Badge>
-                    ) : (
-                      <Badge bg="secondary" className={ui.badgePill}>Solo lectura</Badge>
-                    )}
-                  </Card.Header>
-                  <Card.Body>
-                    <AttachmentsList minuteId={minute.id} readOnly={!showOwnerEdit} />
-                  </Card.Body>
-                </Card>
-              </Col>
-            </Row>
-          </>
-        )}
+              {opErr && <Alert className="mt-2 mb-0" variant="danger">{opErr}</Alert>}
+            </Card.Body>
+          </Card>
+          {/* === FIN TIMER ===================================================== */}
+
+          <Card className={ui.card}>
+            <Card.Header className={ui.cardHeader}>
+              <span>Información básica</span>
+              <Badge bg="light" text="dark" title="Folio">#{folioText}</Badge>
+            </Card.Header>
+
+            {showOwnerEdit ? (
+              <Card.Body className={`${userUi.userFormScope} ${minute.end_time ? userUi.unlockTarea : ''}`}>
+                {/* Lock visual del campo interno */}
+                <LockTareaRealizada />
+
+                {/* ✅ Editor propio (único visible) */}
+                {(!tareaLocked && !!minute.end_time) && (
+                  <div className="mb-3">
+                    <label className="form-label">Tarea realizada</label>
+                    <textarea
+                      name="tareaRealizada"
+                      className="form-control"
+                      rows={6}
+                      placeholder="Describe lo que realizaste…"
+                      value={tareaText}
+                      onChange={onTareaChange}
+                      onBlur={onTareaBlur}
+                      disabled={!canEditTarea}
+                    />
+                    <div className="form-text">
+                      {saveState === 'saving' && 'Guardando…'}
+                      {saveState === 'saved' && 'Guardado ✓'}
+                      {saveState === 'error' && 'No se pudo guardar. Reintenta.'}
+                    </div>
+                  </div>
+                )}
+
+                {tareaLocked && (
+                  <Alert variant="secondary" className="mb-3">
+                    La <strong>tarea realizada</strong> fue guardada y ahora está bloqueada.
+                  </Alert>
+                )}
+
+                {/* MinuteForm para el resto de campos (ocultamos su campo "tarea") */}
+                <div className="mm-hide-tarea">
+                  <MinuteForm
+                    mode="edit"
+                    minuteId={minute.id}
+                    onCancel={() => router.back()}
+                    requireAttachmentOnCreate={false}
+                    enableAutosave={true}
+                    autosaveDelayMs={800}
+                    initialValues={{
+                      tarea_realizada: tareaValueServer,
+                      novedades: minute.novedades ?? '',
+                    }}
+                    ignoreTareaValidation={true}
+                    tareaMirrorValue={tareaText}
+                    onSaved={async () => {
+                      setTareaLocked(true)
+                      try { await supabase.from('minute').update({ tarea_cerrada: true }).eq('id', minute.id) } catch {}
+                      await mutate(undefined, { revalidate: true })
+                    }}
+                  />
+                </div>
+
+                {/* CSS local para ocultar el campo duplicado del MinuteForm */}
+                <style jsx>{`
+                  .mm-hide-tarea :global(label[for="tarea"]),
+                  .mm-hide-tarea :global(#tarea) {
+                    display: none !important;
+                  }
+                `}</style>
+              </Card.Body>
+            ) : (
+              <Card.Body>
+                <div className={ui.kvGrid} aria-label="Resumen de campos">
+                  <div className={ui.k}><FiCalendar /> Fecha</div><div className={ui.v}>{dateStr}</div>
+                  <div className={ui.k}><FiClock /> Horario</div><div className={ui.v}>{timeStr}</div>
+                  <div className={ui.k}>Tarea realizada</div>
+                  <div className={ui.v}>{tareaValueServer || <span className={ui.muted}>—</span>}</div>
+                  <div className={ui.k}>Novedades</div>
+                  <div className={ui.v}>{minute.novedades || <span className={ui.muted}>—</span>}</div>
+                </div>
+              </Card.Body>
+>>>>>>> Stashed changes
+            )}
+
+            <Form.Group controlId="monthSelect" className="m-0">
+              <Form.Label className="mb-1">Mes</Form.Label>
+              <Form.Control
+                type="month"
+                value={ym}
+                onChange={(e) => { setYm(e.target.value); setShowNudge(false) }}
+              />
+            </Form.Group>
+          </Col>
+        </Row>
+
+        {/* Botón Export CSV del resumen */}
+        <div className="d-flex justify-content-end mb-2">
+          <Button size="sm" variant="outline-success" onClick={onExportMonthlyCsv}>
+            Exportar resumen (CSV)
+          </Button>
+        </div>
+
+        {error && <Alert variant="danger" className="mb-3">{error}</Alert>}
+
+        <Card className="p-3 mb-4">
+          {loading ? (
+            <div className="d-flex align-items-center gap-2">
+              <Spinner size="sm" animation="border" /> Cargando…
+            </div>
+          ) : (
+            <div style={{ width: '100%', height: 360 }}>
+              <ResponsiveContainer>
+                <ComposedChart data={overviewChart} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis unit="h" />
+                  <Tooltip />
+                  <Legend />
+                  <Bar
+                    dataKey="effectiveH"
+                    name="Efectivo (h)"
+                    fill={PALETTE.effective}
+                    radius={[6,6,0,0]}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="expectedH"
+                    name="Meta (h)"
+                    stroke={PALETTE.expected}
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-3">
+          <div className="table-responsive">
+            <Table hover className="align-middle">
+              <thead>
+                <tr>
+                  <th>Usuario</th>
+                  <th className="text-center">Días c/reg.</th>
+                  <th className="text-end" title="Tiempo total entre inicio y fin por día, sin descuentos.">Bruto</th>
+                  <th className="text-end">Descansos</th>
+                  <th className="text-end">Tiempo muerto (promedio)</th>
+                  <th className="text-end">Efectivo</th>
+                  <th className="text-end">Meta mes</th>
+                  <th className="text-end">Cumpl.</th>
+                  <th className="text-end"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {dataByUser.map(u => {
+                  const compliance = pct(u.effectiveMin)
+                  return (
+                    <tr key={u.email}>
+                      <td>
+                        <div className="fw-semibold">{u.name}</div>
+                        <div className="text-muted small">{u.email}</div>
+                      </td>
+                      <td className="text-center">{u.daysWithLogs}</td>
+                      <td className="text-end">{minToHhmm(u.grossMin)}</td>
+                      <td className="text-end">{minToHhmm(u.restMin)}</td>
+                      <td className="text-end">{minToHhmm(u.idleMin)}</td>
+                      <td className="text-end fw-semibold">{minToHhmm(u.effectiveMin)}</td>
+                      <td className="text-end">{minToHhmm(expectedMonthEffectiveMin)}</td>
+                      <td className="text-end">
+                        <Badge bg={compliance >= 100 ? 'success' : compliance >= 80 ? 'warning' : 'secondary'}>
+                          {compliance}%
+                        </Badge>
+                      </td>
+                      <td className="text-end">
+                        <Button size="sm" variant="outline-primary" onClick={() => { setDetail(u); setShow(true) }}>
+                          Ver detalle
+                        </Button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </Table>
+          </div>
+        </Card>
       </Container>
-    </SessionGate>
+
+      {/* Modal Detalle Usuario */}
+      <Modal show={!!detail && show} onHide={() => setShow(false)} size="xl">
+        <Modal.Header closeButton>
+          <Modal.Title>Detalle — {detail?.name} ({ym})</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {!detail ? null : (
+            <>
+              <Row className="g-3">
+                <Col lg={8}>
+                  <Card className="p-3 h-100">
+                    <h6 className="mb-2">Composición diaria (horas)</h6>
+                    <div ref={chartDailyRef} style={{ width: '100%', height: 260, background: '#fff' }}>
+                      <ResponsiveContainer>
+                        <ComposedChart
+                          data={detailDailyChart}
+                          margin={{ top: 10, right: 20, left: 0, bottom: 0 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="date" />
+                          <YAxis unit="h" />
+                          <Tooltip content={<ChartTooltip />} />
+                          <Legend />
+                          <Bar dataKey="restH"      name="Descansos"                stackId="a" fill={PALETTE.rest} />
+                          <Bar dataKey="idleH"      name="Tiempo muerto (promedio)" stackId="a" fill={PALETTE.idle} />
+                          <Bar dataKey="effectiveH" name="Efectivo"                 stackId="a" fill={PALETTE.effective} />
+                          <Line
+                            type="monotone"
+                            dataKey="effectiveH"
+                            name="Efectivo (línea)"
+                            stroke={PALETTE.effective}
+                            strokeWidth={2}
+                            dot={false}
+                          />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <MetricHelp />
+                  </Card>
+                </Col>
+                <Col lg={4}>
+                  <Card className="p-3 h-100 d-flex flex-column justify-content-center">
+                    <h6 className="mb-2">Cumplimiento mensual</h6>
+                    <div ref={donutRef} style={{ width: '100%', height: 240, background: '#fff' }}>
+                      <ResponsiveContainer>
+                        <PieChart>
+                          <Pie
+                            data={[
+                              { name: 'Efectivo',           value: +(Math.min(detail.effectiveMin, Math.max(1, expectedMonthEffectiveMin) ) / 60).toFixed(2) },
+                              { name: 'Restante para meta', value: +(Math.max(0, expectedMonthEffectiveMin - detail.effectiveMin) / 60).toFixed(2) },
+                            ]}
+                            dataKey="value"
+                            nameKey="name"
+                            innerRadius={60}
+                            outerRadius={90}
+                            paddingAngle={2}
+                          >
+                            {[PALETTE.effective, PALETTE.donutBg].map((c, i) => (
+                              <Cell key={i} fill={c} />
+                            ))}
+                          </Pie>
+                          <Tooltip />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="text-center mt-2">
+                      <div className="display-6 fw-bold">
+                        {expectedMonthEffectiveMin > 0
+                          ? Math.round((detail.effectiveMin / expectedMonthEffectiveMin) * 100)
+                          : 0}%</div>
+                      <div className="text-muted small">
+                        Efectivo: {minToHhmm(detail.effectiveMin)} / Meta: {minToHhmm(expectedMonthEffectiveMin)}
+                      </div>
+                    </div>
+                  </Card>
+                </Col>
+              </Row>
+
+              <Card className="p-3 mt-3">
+                <div className="d-flex flex-wrap gap-2 justify-content-between align-items-center">
+                  <h6 className="mb-2">Tabla diaria</h6>
+                  <div className="d-flex gap-2">
+                    <Button size="sm" variant="outline-success" onClick={onExportDetailCsv}>
+                      Exportar detalle (CSV)
+                    </Button>
+                    <Button size="sm" variant="success" onClick={onExportDetailXlsx}>
+                      Exportar detalle (XLSX con gráficos)
+                    </Button>
+                  </div>
+                </div>
+                <div className="table-responsive">
+                  <Table size="sm" hover>
+                    <thead>
+                      <tr>
+                        <th>Fecha</th>
+                        <th className="text-end" title="Tiempo total entre inicio y fin por día, sin descuentos.">
+                          Bruto
+                        </th>
+                        <th className="text-end">Descansos</th>
+                        <th className="text-end">Tiempo muerto (promedio)</th>
+                        <th className="text-end">Efectivo</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.byDay.map(d => (
+                        <tr key={d.date}>
+                          <td>{d.date}</td>
+                          <td className="text-end">{minToHhmm(d.grossMin)}</td>
+                          <td className="text-end">{minToHhmm(d.restMin)}</td>
+                          <td className="text-end">{minToHhmm(d.idleMin)}</td>
+                          <td className="text-end fw-semibold">{minToHhmm(d.effectiveMin)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </Table>
+                </div>
+              </Card>
+            </>
+          )}
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" onClick={() => setShow(false)}>Cerrar</Button>
+        </Modal.Footer>
+      </Modal>
+
+      {/* Estilos del nudge y del botón Volver */}
+      <style jsx>{`
+        /* --- NUDGE (filtro por mes) --- */
+        .stats-nudge {
+          display: inline-flex;
+          align-items: center;
+          gap: .5rem;
+          user-select: none;
+          pointer-events: none;
+        }
+        .pulse {
+          width: 10px;
+          height: 10px;
+          border-radius: 9999px;
+          background: #009ada;
+          box-shadow: 0 0 0 0 rgba(0, 154, 218, 0.6);
+          animation: pulseAnim 1.8s ease-out infinite;
+        }
+        @keyframes pulseAnim {
+          0%   { box-shadow: 0 0 0 0 rgba(0,154,218,.6); }
+          70%  { box-shadow: 0 0 0 12px rgba(0,154,218,0); }
+          100% { box-shadow: 0 0 0 0 rgba(0,154,218,0); }
+        }
+        .tip {
+          background: #e6f7ff;
+          color: #035d82;
+          border: 1px solid rgba(0, 154, 218, .25);
+          font-weight: 600;
+          padding: 3px 10px;
+          border-radius: 999px;
+          font-size: .85rem;
+          white-space: nowrap;
+        }
+        .arrow {
+          font-size: 1.25rem;
+          line-height: 1;
+          transform: translateY(-1px);
+        }
+        @media (max-width: 768px) {
+          .arrow { display: none; }
+          .tip { font-size: .8rem; }
+        }
+
+        /* --- Botón Volver (branding #009ada) --- */
+        .backBtn {
+          display: inline-flex;
+          align-items: center;
+          gap: .5rem;
+          padding: .35rem .6rem;
+          border-radius: 9999px;
+          background: transparent;
+          color: #009ada;
+          border: 1px solid transparent;
+          font-weight: 600;
+          line-height: 1;
+          cursor: pointer;
+          text-decoration: none;
+        }
+        .backBtn :global(svg) {
+          transform: translateY(-1px);
+        }
+        .backBtn:hover {
+          background: #e6f7ff;
+          border-color: rgba(0,154,218,.25);
+          text-decoration: none;
+        }
+        .backBtn:focus {
+          outline: none;
+          box-shadow: 0 0 0 .2rem rgba(0,154,218,.35);
+        }
+      `}</style>
+    </RequireRole>
   )
 }
