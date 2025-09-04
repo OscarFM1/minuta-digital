@@ -3,7 +3,7 @@
  * Crear nueva minuta (flujo Start/Stop) — SIN inputs de hora
  * ----------------------------------------------------------------------------
  * - Ya NO muestra "Hora inicio" ni "Hora fin".
- * - Crea la minuta solo con fecha + descripción (y opcionales: tarea/novedades).
+ * - Crea la minuta con fecha automática + descripción (y opcionales: tarea/novedades).
  * - Tras guardar, redirige a /minutas/[id]#timer para usar exclusivamente Start/Stop.
  *
  * Seguridad/arquitectura:
@@ -15,7 +15,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
 import { Form, Button, Card, Alert, Spinner, Row, Col } from 'react-bootstrap'
-import { createMinute } from '@/lib/minutes' // API controlada (sin folio/serial)
+import { createMinute } from '@/lib/minutes'
 import ui from '@/styles/NewMinute.module.css'
 import styles from '@/styles/Minutas.module.css'
 import { supabase } from '@/lib/supabaseClient'
@@ -35,15 +35,19 @@ function toFriendlyMessage(err: unknown): string {
   return e?.message ?? e?.error_description ?? 'Ocurrió un error. Intenta más tarde.'
 }
 
+// Helpers de fecha (evita tz)
+const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`)
+const todayISO = (() => {
+  const d = new Date()
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+})()
+const friendlyDate = todayISO.replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$3/$2/$1')
+
 export default function NuevaMinutaPage() {
   const router = useRouter()
 
   // Estado del form (sin horas)
-  const [date, setDate] = useState<string>(() => {
-    const d = new Date()
-    const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`)
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-  })
+  // ✅ Eliminamos el estado editable de la fecha. Se muestra readonly y se envía todayISO.
   const [description, setDescription] = useState<string>('') // título/descr. principal
   const [tarea, setTarea] = useState<string>('')            // opcional
   const [novedades, setNovedades] = useState<string>('')    // opcional
@@ -68,10 +72,10 @@ export default function NuevaMinutaPage() {
       if (!ok) return
 
       const row = await createMinute({
-        date,
-        start_time: null,      // 👈 siempre null
-        end_time: null,        // 👈 siempre null
-        description: description || null, // la API sólo la envía si existe la columna
+        date: todayISO,                     // 👈 fija a hoy (no editable en UI)
+        start_time: null,
+        end_time: null,
+        description: description || null,
         tarea_realizada: tarea || null,
         novedades: novedades || null,
         is_protected: false,
@@ -115,14 +119,17 @@ export default function NuevaMinutaPage() {
 
             <Form onSubmit={onSubmit}>
               <Row className="g-3">
+                {/* Fecha (solo informativa, no editable) */}
                 <Col md={4}>
                   <Form.Group controlId="date">
                     <Form.Label>Fecha</Form.Label>
                     <Form.Control
-                      type="date"
-                      value={date}
-                      onChange={(e) => setDate(e.target.value)}
-                      required
+                      type="text"
+                      value={friendlyDate}
+                      readOnly
+                      aria-readonly="true"
+                      tabIndex={-1}
+                      className="readonlyInput"
                     />
                   </Form.Group>
                 </Col>
@@ -174,6 +181,16 @@ export default function NuevaMinutaPage() {
           </Card.Body>
         </Card>
       </div>
+
+      {/* Estilo para bloquear totalmente la interacción del campo de fecha */}
+      <style jsx>{`
+        .readonlyInput {
+          pointer-events: none;       /* evita click/foco */
+          background: #0c1626;        /* consistente con tema oscuro */
+          color: #fff;
+          opacity: 0.95;
+        }
+      `}</style>
     </main>
   )
 }
