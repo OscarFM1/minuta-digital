@@ -2,13 +2,9 @@
 /**
  * Crear nueva minuta (flujo Start/Stop) — SIN inputs de hora
  * ----------------------------------------------------------------------------
- * - Ya NO muestra "Hora inicio" ni "Hora fin".
+ * - Fecha fija (hoy) no editable en UI.
  * - Crea la minuta con fecha automática + descripción (y opcionales: tarea/novedades).
  * - Tras guardar, redirige a /minutas/[id]#timer para usar exclusivamente Start/Stop.
- *
- * Seguridad/arquitectura:
- * - Usa createMinute(...) de src/lib/minutes (NO envía folio/serial; retry 23505).
- * - No renderiza adjuntos aquí; se manejan en el detalle.
  */
 
 import { useState } from 'react'
@@ -19,6 +15,16 @@ import { createMinute } from '@/lib/minutes'
 import ui from '@/styles/NewMinute.module.css'
 import styles from '@/styles/Minutas.module.css'
 import { supabase } from '@/lib/supabaseClient'
+
+// Helpers de fecha (local, sin zonas raras)
+const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`)
+function getTodayISO() {
+  const d = new Date()
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+function getFriendlyFromISO(iso: string) {
+  return iso.replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$3/$2/$1')
+}
 
 // Placeholder especializado para preprensa
 const TITLE_PLACEHOLDER =
@@ -35,19 +41,14 @@ function toFriendlyMessage(err: unknown): string {
   return e?.message ?? e?.error_description ?? 'Ocurrió un error. Intenta más tarde.'
 }
 
-// Helpers de fecha (evita tz)
-const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`)
-const todayISO = (() => {
-  const d = new Date()
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-})()
-const friendlyDate = todayISO.replace(/^(\d{4})-(\d{2})-(\d{2})$/, '$3/$2/$1')
-
 export default function NuevaMinutaPage() {
   const router = useRouter()
 
+  // ⛔️ Ya no guardamos fecha en estado.
+  const todayISO = getTodayISO()
+  const friendlyDate = getFriendlyFromISO(todayISO)
+
   // Estado del form (sin horas)
-  // ✅ Eliminamos el estado editable de la fecha. Se muestra readonly y se envía todayISO.
   const [description, setDescription] = useState<string>('') // título/descr. principal
   const [tarea, setTarea] = useState<string>('')            // opcional
   const [novedades, setNovedades] = useState<string>('')    // opcional
@@ -72,7 +73,7 @@ export default function NuevaMinutaPage() {
       if (!ok) return
 
       const row = await createMinute({
-        date: todayISO,                     // 👈 fija a hoy (no editable en UI)
+        date: todayISO,                 // 👈 fija a hoy (no editable en UI)
         start_time: null,
         end_time: null,
         description: description || null,
@@ -119,18 +120,13 @@ export default function NuevaMinutaPage() {
 
             <Form onSubmit={onSubmit}>
               <Row className="g-3">
-                {/* Fecha (solo informativa, no editable) */}
+                {/* Fecha (solo informativa, NO editable) */}
                 <Col md={4}>
                   <Form.Group controlId="date">
                     <Form.Label>Fecha</Form.Label>
-                    <Form.Control
-                      type="text"
-                      value={friendlyDate}
-                      readOnly
-                      aria-readonly="true"
-                      tabIndex={-1}
-                      className="readonlyInput"
-                    />
+                    <div className="readonlyDate" aria-readonly="true">
+                      {friendlyDate}
+                    </div>
                   </Form.Group>
                 </Col>
 
@@ -182,13 +178,21 @@ export default function NuevaMinutaPage() {
         </Card>
       </div>
 
-      {/* Estilo para bloquear totalmente la interacción del campo de fecha */}
+      {/* Estilo para el display de fecha (simula input, pero no es interactivo) */}
       <style jsx>{`
-        .readonlyInput {
-          pointer-events: none;       /* evita click/foco */
-          background: #0c1626;        /* consistente con tema oscuro */
+        .readonlyDate {
+          display: inline-flex;
+          align-items: center;
+          width: 100%;
+          min-height: 38px;
+          padding: 8px 12px;
+          border-radius: 0.375rem;
+          background: #0c1626; /* consistente con el tema oscuro */
           color: #fff;
-          opacity: 0.95;
+          border: 1px solid rgba(255,255,255,0.1);
+          user-select: none;
+          pointer-events: none; /* no clics ni foco */
+          font-variant-numeric: tabular-nums;
         }
       `}</style>
     </main>
