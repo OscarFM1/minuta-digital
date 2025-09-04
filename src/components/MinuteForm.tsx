@@ -80,13 +80,15 @@ export default function MinuteForm({
   const [workType, setWorkType] = useState<WorkType | ''>(
     mode === 'edit' ? (initialWorkType ?? '') : ''
   )
-
-  // 🔒 Solo lectura en edición cuando YA existe un tipo guardado
+  // 🔒 si ya hay tipo guardado, bloqueado desde el inicio
   const workTypeReadOnly = mode === 'edit' && !!initialWorkType
-  // Para saber si debemos persistir cambios del select en EDIT
+  // Bloqueo dinámico tras primer guardado en legacy
+  const [lockWorkType, setLockWorkType] = useState<boolean>(workTypeReadOnly)
+
+  // ¿persistimos WT en edit? (solo legacy sin valor inicial)
   const shouldPersistWorkTypeInEdit = mode === 'edit' && !initialWorkType
 
-  // Para saber si cambió el work type en EDIT (legacy)
+  // Evitar writes repetidos
   const [lastSavedWorkType, setLastSavedWorkType] = useState<string>(
     (initialWorkType ?? '') as string
   )
@@ -99,11 +101,13 @@ export default function MinuteForm({
     setLastSaved(init)
   }, [init])
 
-  // Si cambia initialWorkType asíncrono (carga), refresca select
+  // Si cambia initialWorkType asíncrono (carga), refresca select y candado
   useEffect(() => {
     if (mode === 'edit') {
-      setWorkType((initialWorkType ?? '') as WorkType | '')
+      const wt = (initialWorkType ?? '') as WorkType | ''
+      setWorkType(wt)
       setLastSavedWorkType((initialWorkType ?? '') as string)
+      setLockWorkType(!!initialWorkType) // bloquea si ya venía
     }
   }, [initialWorkType, mode])
 
@@ -150,10 +154,8 @@ export default function MinuteForm({
           tarea_realizada: snapshot.tarea_realizada.trim(),
           novedades: snapshot.novedades.trim() ? snapshot.novedades.trim() : null,
         }
-        // 👇 Solo persistimos work_type en EDIT cuando el campo es editable (legacy)
-        if (changedWorkType) {
-          payload.work_type = currentWorkType || null
-        }
+        // 👇 Persistimos WT en EDIT solo cuando es editable (legacy)
+        if (changedWorkType) payload.work_type = currentWorkType || null
 
         const updated = await updateMinute(minuteId, payload)
 
@@ -161,7 +163,10 @@ export default function MinuteForm({
           tarea_realizada: snapshot.tarea_realizada,
           novedades: snapshot.novedades,
         })
-        if (changedWorkType) setLastSavedWorkType(currentWorkType)
+        if (changedWorkType) {
+          setLastSavedWorkType(currentWorkType)
+          setLockWorkType(true) // ✅ bloquear tras primer guardado
+        }
 
         setAutoStatus('saved')
         onSaved?.(updated)
@@ -182,10 +187,7 @@ export default function MinuteForm({
   // Submit manual (create o edit)
   const onSubmit = async () => {
     const err = validateForSubmit()
-    if (err) {
-      setErrorMsg(err)
-      return
-    }
+    if (err) { setErrorMsg(err); return }
 
     setSaving(true)
     setErrorMsg(null)
@@ -216,15 +218,15 @@ export default function MinuteForm({
           tarea_realizada: values.tarea_realizada.trim(),
           novedades: values.novedades.trim() ? values.novedades.trim() : null,
         }
-        // 👇 En EDIT, solo mandamos work_type si el select es editable (legacy) y cambió
-        if (shouldPersistWorkTypeInEdit && (workType as string) !== lastSavedWorkType) {
-          payload.work_type = (workType as string) || null
-        }
+        // 👇 En EDIT, solo mandamos work_type si era editable (legacy) y cambió
+        const changedWT = shouldPersistWorkTypeInEdit && (workType as string) !== lastSavedWorkType
+        if (changedWT) payload.work_type = (workType as string) || null
 
         const updated = await updateMinute(minuteId, payload)
         setLastSaved(values)
-        if (payload.work_type !== undefined) {
+        if (changedWT) {
           setLastSavedWorkType((workType as string) || '')
+          setLockWorkType(true) // ✅ bloquear tras guardar manual
         }
         onSaved?.(updated)
       }
@@ -249,10 +251,7 @@ export default function MinuteForm({
   return (
     <form
       className={`${ui.formGrid} ${saving ? ui.saving : ''}`}
-      onSubmit={(e) => {
-        e.preventDefault()
-        onSubmit()
-      }}
+      onSubmit={(e) => { e.preventDefault(); onSubmit() }}
       noValidate
     >
       {/* Título (solo crear) */}
@@ -282,7 +281,7 @@ export default function MinuteForm({
             value={(workType as string) || ''}
             onChange={(e) => setWorkType(e.target.value as WorkType)}
             required={mode === 'create'}
-            disabled={workTypeReadOnly}
+            disabled={workTypeReadOnly || lockWorkType} 
           >
             {mode === 'create' && <option value="" disabled>Selecciona una opción…</option>}
             {WORK_TYPE_OPTIONS.map((opt) => (
