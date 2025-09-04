@@ -1,16 +1,9 @@
+// src/components/MinuteForm.tsx
 /**
  * Formulario de crear/editar Minuta
- * - Crear: "Título de tarea" + "Tarea a realizar" (sin Novedades)
- * - Editar: "Tarea realizada" + Novedades (opcional)
+ * - Crear: "Título de tarea" + "Tarea a realizar" (+ Tipo de trabajo obligatorio)
+ * - Editar: "Tarea realizada" + Novedades (opcional) + Tipo de trabajo bloqueado (solo lectura)
  * - Start/Stop son la fuente de verdad para horas (no se editan aquí)
- * - Normaliza '' -> null/undefined antes de persistir
- *
- * Nuevas props:
- * - ignoreTareaValidation?: boolean  -> desactiva la validación requerida del campo "tarea".
- * - tareaMirrorValue?: string        -> espejo desde un editor externo para poblar el estado interno y pasar validaciones.
- *
- * ⚠️ Workers: al crear solo pueden crear la minuta y adjuntar evidencias.
- *   No hay edición de tiempos ni asignación manual de fechas en este form.
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -19,23 +12,30 @@ import { createMinute, updateMinute } from '@/lib/minutes'
 import { uploadAttachment, createAttachmentRecords } from '@/lib/uploadAttachment'
 import type { Minute } from '@/types/minute'
 import ui from '@/styles/NewMinute.module.css'
-import { WORK_TYPE_OPTIONS } from '@/types/minute'
+
+// Work type: usamos las opciones y derivamos el tipo del array de valores
+import { WORK_TYPE_OPTIONS, WORK_TYPE_VALUES } from '@/types/minute'
+export type WorkType = (typeof WORK_TYPE_VALUES)[number] // ← exportado para uso externo si se requiere
 
 /** Valores que este form maneja (sin horas) */
 type FormValues = {
   tarea_realizada: string
   novedades: string
-  /** Nuevo: tipo de trabajo ('' = sin seleccionar) */
-  work_type: string
 }
 
 type MinuteId = string
 
-interface MinuteFormProps {
+export interface MinuteFormProps {
   mode: 'create' | 'edit'
   minuteId?: MinuteId
   /** Para editar: valores iniciales */
   initialValues?: Partial<FormValues>
+  /**
+   * Para visualizar en edición el tipo de trabajo ya guardado.
+   * - En "edit", si viene con valor => el select queda bloqueado.
+   * - Si no viene, el select queda habilitado (permite corregir data antigua).
+   */
+  initialWorkType?: WorkType | null
   onSaved?: (minute: Minute) => void
   onCancel?: () => void
   /** En crear ya no pedimos adjuntos; déjalo en false */
@@ -46,9 +46,9 @@ interface MinuteFormProps {
   /** Si algún día quisieras permitir novedades en create, actívalo */
   allowNovedadesInCreate?: boolean
 
-  /** ✅ NUEVO: desactiva el "required" de tarea_realizada (cuando usas editor externo) */
+  /** Desactiva la validación requerida del campo "tarea" cuando usas editor externo */
   ignoreTareaValidation?: boolean
-  /** ✅ NUEVO: valor espejo desde editor externo para mantener el estado interno consistente */
+  /** Valor espejo desde editor externo para mantener el estado interno consistente */
   tareaMirrorValue?: string
 }
 
@@ -59,6 +59,7 @@ export default function MinuteForm({
   mode,
   minuteId,
   initialValues,
+  initialWorkType = null,
   onSaved,
   onCancel,
   requireAttachmentOnCreate = false,
@@ -73,7 +74,6 @@ export default function MinuteForm({
     () => ({
       tarea_realizada: initialValues?.tarea_realizada ?? '',
       novedades: initialValues?.novedades ?? '',
-      work_type: initialValues?.work_type ?? '', // '' = sin seleccionar
     }),
     [initialValues]
   )
@@ -89,15 +89,31 @@ export default function MinuteForm({
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
   const [drag, setDrag] = useState(false)
 
+  // Tipo de trabajo:
+  // - En "create": obligatorio y editable
+  // - En "edit": bloqueado SOLO si hay valor inicial (evita dejarlo vacío y bloqueado)
+  const [workType, setWorkType] = useState<WorkType | ''>(
+    mode === 'edit' ? (initialWorkType ?? '') : ''
+  )
+  const workTypeReadOnly = mode === 'edit' && !!initialWorkType
+
   const autosaveEnabled = enableAutosave ?? mode === 'edit'
   const showNovedades = mode === 'edit' || allowNovedadesInCreate
 
+  // Sincroniza valores iniciales cuando cambian (navegación entre minutas, etc.)
   useEffect(() => {
     setValues(init)
     setLastSaved(init)
   }, [init])
 
-  /** ✅ Mirror: si llega texto externo (editor propio), actualiza el estado interno */
+  // Si cambia el initialWorkType (p. ej. al cargar asíncrono), refresca el select en edición
+  useEffect(() => {
+    if (mode === 'edit') {
+      setWorkType((initialWorkType ?? '') as WorkType | '')
+    }
+  }, [initialWorkType, mode])
+
+  /** Mirror: si llega texto externo (editor propio), actualiza el estado interno */
   useEffect(() => {
     if (mode !== 'edit') return
     if (typeof tareaMirrorValue !== 'string') return
@@ -107,15 +123,14 @@ export default function MinuteForm({
 
   // -------- Helpers --------
   const isSame = (a: FormValues, b: FormValues) =>
-    a.tarea_realizada === b.tarea_realizada &&
-    a.novedades === b.novedades &&
-    a.work_type === b.work_type
+    a.tarea_realizada === b.tarea_realizada && a.novedades === b.novedades
 
   const validateForSubmit = (): string | null => {
     if (!ignoreTareaValidation && !values.tarea_realizada.trim())
       return 'La "tarea" no puede estar vacía.'
-    if (mode === 'create' && !values.work_type)
-      return 'Selecciona el tipo de trabajo.'
+    if (mode === 'create' && !workType) {
+      return 'Debes seleccionar el Tipo de trabajo.'
+    }
     if (mode === 'create' && requireAttachmentOnCreate && files.length === 0) {
       return 'Debes adjuntar al menos un archivo como evidencia.'
     }
@@ -136,12 +151,10 @@ export default function MinuteForm({
         const updated = await updateMinute(minuteId, {
           tarea_realizada: snapshot.tarea_realizada.trim(),
           novedades: snapshot.novedades.trim() ? snapshot.novedades.trim() : null,
-          work_type: snapshot.work_type || null,
         })
         setLastSaved({
           tarea_realizada: snapshot.tarea_realizada,
           novedades: snapshot.novedades,
-          work_type: snapshot.work_type,
         })
         setAutoStatus('saved')
         onSaved?.(updated)
@@ -157,7 +170,7 @@ export default function MinuteForm({
     if (mode !== 'edit' || !autosaveEnabled) return
     debouncedAutosave(values)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [values.tarea_realizada, values.novedades, values.work_type])
+  }, [values.tarea_realizada, values.novedades])
 
   // Submit manual (create o edit)
   const onSubmit = async () => {
@@ -179,7 +192,7 @@ export default function MinuteForm({
           tarea_realizada: values.tarea_realizada.trim(),
           description: title.trim() ? title.trim() : undefined,
           novedades: null,
-          work_type: values.work_type || null,
+          work_type: workType || null,
           // start_time / end_time se manejan por Start/Stop fuera del form
         })
 
@@ -198,7 +211,6 @@ export default function MinuteForm({
         const updated = await updateMinute(minuteId, {
           tarea_realizada: values.tarea_realizada.trim(),
           novedades: values.novedades.trim() ? values.novedades.trim() : null,
-          work_type: values.work_type || null,
         })
         setLastSaved(values)
         onSaved?.(updated)
@@ -207,23 +219,6 @@ export default function MinuteForm({
       setErrorMsg(e.message ?? 'No fue posible guardar.')
     } finally {
       setSaving(false)
-    }
-  }
-
-  // Guardado inmediato del tipo (evita que “parezca” que recarga)
-  const onWorkTypeChange = async (v: string) => {
-    setValues(prev => ({ ...prev, work_type: v }))
-    if (mode === 'edit' && minuteId) {
-      try {
-        setAutoStatus('saving')
-        const updated = await updateMinute(minuteId, { work_type: v || null })
-        setLastSaved(prev => ({ ...prev, work_type: v }))
-        setAutoStatus('saved')
-        onSaved?.(updated)
-        setTimeout(() => setAutoStatus('idle'), 800)
-      } catch {
-        setAutoStatus('error')
-      }
     }
   }
 
@@ -267,21 +262,24 @@ export default function MinuteForm({
       {/* Tipo de trabajo */}
       <div className={ui.field}>
         <label className={ui.label} htmlFor="work_type">
-          Tipo de trabajo
+          Tipo de trabajo {mode === 'create' && <span aria-hidden="true">*</span>}
         </label>
-        <select
-          id="work_type"
-          value={values.work_type}
-          onChange={(e) => onWorkTypeChange(e.target.value)}
-          className={ui.select}
-          // Obligatorio en create, opcional en edit
-          required={mode === 'create'}
-        >
-          <option value="">Selecciona un tipo…</option>
-          {WORK_TYPE_OPTIONS.map(opt => (
-            <option key={opt.value} value={opt.value}>{opt.label}</option>
-          ))}
-        </select>
+        <div className="wt-wrap">
+          <select
+            id="work_type"
+            className="wt-select"
+            value={(workType as string) || ''}
+            onChange={(e) => setWorkType(e.target.value as WorkType)}
+            required={mode === 'create'}
+            disabled={workTypeReadOnly}
+          >
+            {/* Placeholder solo en create */}
+            {mode === 'create' && <option value="" disabled>Selecciona una opción…</option>}
+            {WORK_TYPE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {/* Tarea (create: a realizar / edit: realizada) */}
@@ -392,6 +390,41 @@ export default function MinuteForm({
           {saving ? 'Guardando…' : mode === 'create' ? 'Crear minuta' : 'Guardar'}
         </button>
       </div>
+
+      {/* --- Estilos del select (mejora UX / sin borde gris) --- */}
+      <style jsx>{`
+        .wt-wrap {
+          position: relative;
+        }
+        .wt-select {
+          width: 100%;
+          padding: 12px 40px 12px 14px;
+          border-radius: 14px;
+          border: none;
+          outline: none;
+          background: #0c1626; /* mismo tono que inputs oscuros */
+          color: #fff;
+          font-size: 14px;
+          line-height: 1.2;
+          appearance: none;
+          -webkit-appearance: none;
+          -moz-appearance: none;
+        }
+        .wt-select:disabled {
+          opacity: 0.9;          /* leve diferencia para indicar lectura */
+          cursor: not-allowed;
+        }
+        .wt-wrap::after {
+          content: '▾';
+          position: absolute;
+          right: 12px;
+          top: 50%;
+          transform: translateY(-50%);
+          pointer-events: none;
+          opacity: 0.75;
+          font-size: 12px;
+        }
+      `}</style>
     </form>
   )
 }
