@@ -1,107 +1,62 @@
-/**
- * POST /api/admin/password-reset
- * 
- * Seguridad:
- * - Requiere Authorization: Bearer <access_token> (token del admin).
- * - Verifica que el email del llamador sea ADMIN_EMAIL.
- * - Valida Origin contra NEXT_PUBLIC_SITE_URL para mitigar CSRF básico.
- * 
- * Funciones:
- * - Modo por defecto: envía email de recuperación (Supabase maneja el envío).
- * - Modo avanzado (linkOnly): genera y retorna el enlace de recuperación para compartir manualmente.
- * 
- * Body JSON:
- * {
- *   "email": "usuario@empresa.com",
- *   "redirectTo": "http://localhost:3000/cambiar-password", // opcional (recomendado)
- *   "mode": "email" | "linkOnly" // opcional; default: "email"
- * }
- */
-
+// src/pages/api/admin/reset-password.ts
 import type { NextApiRequest, NextApiResponse } from 'next'
+import { isAllowedOrigin, allowedOrigins } from '@/lib/allowedOrigins'
 import { createClient } from '@supabase/supabase-js'
-import { supabaseAdmin } from '@/lib/supabaseAdmin'
-
-const SITE = process.env.NEXT_PUBLIC_SITE_URL!
-const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'operaciones@multi-impresos.com'
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!
-const SUPABASE_ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-
-// Cliente "normal" (anon) solo para usar resetPasswordForEmail en el servidor.
-const supabaseServer = createClient(SUPABASE_URL, SUPABASE_ANON, {
-  auth: { autoRefreshToken: false, persistSession: false },
-})
 
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  // 1) CORS por ORIGIN estricto (no dependas de Referer)
+  if (!isAllowedOrigin(req.headers.origin as string | undefined)) {
+    return res.status(403).json({
+      ok: false,
+      error: 'Origen no permitido',
+      detail: { received: req.headers.origin || null, allow: allowedOrigins() },
+    })
+  }
+
+  if (req.method !== 'POST') {
+    return res.status(405).json({ ok: false, error: 'Method Not Allowed' })
+  }
+
   try {
-    // 1) Método permitido
-    if (req.method !== 'POST') {
-      res.setHeader('Allow', 'POST')
-      return res.status(405).json({ error: 'Método no permitido' })
+    const { loginOrEmail, password } = req.body as { loginOrEmail: string; password?: string }
+
+    if (!loginOrEmail) {
+      return res.status(400).json({ ok: false, error: 'Falta login o correo' })
     }
 
-    // 2) Validación de ORIGIN (CSRF básico sin cookies SameSite=strict)
-    const origin = req.headers.origin
-    if (!origin || ![SITE, 'http://localhost:3000'].includes(origin)) {
-      return res.status(403).json({ error: 'Origin no permitido' })
+    // Construye el email final si te pasan "kat.blades" (login local)
+    const email = loginOrEmail.includes('@')
+      ? loginOrEmail.trim().toLowerCase()
+      : `${loginOrEmail.trim().toLowerCase()}@${process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'}`
+
+    // Solo server-side: Service Role
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const service = process.env.SUPABASE_SERVICE_ROLE_KEY
+    if (!url || !service) {
+      return res.status(500).json({ ok: false, error: 'Faltan credenciales de servidor' })
     }
 
-    // 3) Autenticación del llamador: requiere Bearer token
-    const authHeader = req.headers.authorization || ''
-    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : ''
-    if (!token) {
-      return res.status(401).json({ error: 'Falta Authorization Bearer token' })
-    }
+    const admin = createClient(url, service, { auth: { persistSession: false } })
 
-    // 4) Obtener usuario del token (fiable) y validar ADMIN
-    const { data: caller, error: userErr } = await supabaseAdmin.auth.getUser(token)
-    if (userErr || !caller?.user?.email) {
-      return res.status(401).json({ error: 'Token inválido o usuario no encontrado' })
-    }
-    const callerEmail = caller.user.email.toLowerCase()
-    if (callerEmail !== ADMIN_EMAIL.toLowerCase()) {
-      return res.status(403).json({ error: 'Solo ADMIN puede resetear contraseñas' })
-    }
+    // 1) buscar user
+    const { data: list, error: listErr } = await admin.auth.admin.listUsers({ page: 1, perPage: 1000 })
+    if (listErr) throw listErr
+    const user = list.users.find(u => (u.email || '').toLowerCase() === email)
+    if (!user) return res.status(404).json({ ok: false, error: 'Usuario no encontrado' })
 
-    // 5) Parseo y validación de body
-    const { email, redirectTo, mode } = (req.body ?? {}) as {
-      email?: string
-      redirectTo?: string
-      mode?: 'email' | 'linkOnly'
-    }
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
-      return res.status(400).json({ error: 'Email inválido' })
-    }
-    const safeRedirect = redirectTo && redirectTo.startsWith(SITE)
-      ? redirectTo
-      : `${SITE}/cambiar-password`
+    // 2) armar payload
+    const payload: any = { user_metadata: { ...(user.user_metadata || {}), first_login: true } }
+    if (password && password.length >= 8) payload.password = password
 
-    // 6) Ejecución según modo
-    const useLinkOnly = mode === 'linkOnly'
-    if (useLinkOnly) {
-      // Generar enlace (NO envía email). Útil para compartir manualmente.
-      const { data, error } = await supabaseAdmin.auth.admin.generateLink({
-        type: 'recovery',
-        email,
-        options: { redirectTo: safeRedirect },
-      })
-      if (error) return res.status(500).json({ error: error.message })
-      return res.status(200).json({
-        ok: true,
-        mode: 'linkOnly',
-        action_link: data.properties?.action_link,
-        // También viene email_otp, hashed_token, etc., pero no los exponemos.
-      })
-    } else {
-      // Enviar el email de recuperación usando el flujo nativo de Supabase.
-      const { error } = await supabaseServer.auth.resetPasswordForEmail(email, {
-        redirectTo: safeRedirect,
-      })
-      if (error) return res.status(500).json({ error: error.message })
-      return res.status(200).json({ ok: true, mode: 'email' })
-    }
+    // 3) actualizar
+    const { error: updErr } = await admin.auth.admin.updateUserById(user.id, payload)
+    if (updErr) throw updErr
+
+    // (opcional) perfilar must_change_password en tabla profiles:
+    // await admin.from('profiles').upsert({ id: user.id, must_change_password: true }, { onConflict: 'id' })
+
+    return res.status(200).json({ ok: true, userId: user.id })
   } catch (e: any) {
-    console.error('password-reset API error:', e)
-    return res.status(500).json({ error: 'Error interno' })
+    return res.status(500).json({ ok: false, error: e?.message || 'Error interno' })
   }
 }
