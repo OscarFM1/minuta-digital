@@ -1,3 +1,4 @@
+// src/pages/cambiar-password.tsx
 import { useEffect, useState } from 'react'
 import Head from 'next/head'
 import { useRouter } from 'next/router'
@@ -6,17 +7,21 @@ import styles from '@/styles/ChangePassword.module.css'
 
 /**
  * /cambiar-password
+ * -----------------------------------------------------------------------------
  * - Requiere sesión activa (si no, redirige a /login).
  * - Cambia la contraseña del usuario actual en Supabase Auth.
- * - 🔑 FIX LOOP: invoca RPC `public.clear_must_change_password()` para bajar el flag
- *   `profiles.must_change_password` a FALSE y evitar redirecciones infinitas.
+ * - 🔑 FIX LOOP:
+ *     1) Intenta RPC `public.clear_must_change_password()` (fuente única en profiles).
+ *     2) Si el RPC no existe/queda inaccesible, fallback a UPDATE self en `profiles`.
+ * - Refresca sesión para limpiar cualquier estado en memoria/JWT.
  * - Redirige a ?go=<ruta> o /minutas/estadisticas tras éxito.
- * - Botón "Cancelar" cierra sesión y va a /login.
- * - 100% CSR.
+ * - "Cancelar" = cerrar sesión y /login.
+ * - 100% CSR. No toca Policies/Triggers/Metadata.
  */
 export default function CambiarPasswordPage() {
   const router = useRouter()
-  // Si no viene ?go=, te envío al dashboard de admin para que valides estadísticas
+
+  // Si no viene ?go=, ruta segura (evita /403 inexistente)
   const go =
     typeof router.query.go === 'string' && router.query.go.trim().length > 0
       ? router.query.go
@@ -77,16 +82,39 @@ export default function CambiarPasswordPage() {
       const { error: updErr } = await supabase.auth.updateUser({ password })
       if (updErr) throw updErr
 
-      // 3) 🔑 FIX LOOP — limpia el flag en profiles (evita que RequireRole vuelva a redirigir)
-      const { error: rpcErr } = await supabase.rpc('clear_must_change_password')
-      if (rpcErr) {
-        // Si no existe el RPC, el mensaje ayuda a detectar la causa.
-        throw new Error(`No se pudo actualizar el estado de la cuenta (RPC). ${rpcErr.message || ''}`)
+      // 3) 🔑 FIX LOOP — limpiar flag en profiles usando RPC, con fallback seguro
+      //    - Si tu función existe: CREATE OR REPLACE FUNCTION public.clear_must_change_password() ...
+      //    - Debe apagar profiles.must_change_password para el usuario actual (auth.uid()).
+      const tryRpc = async () => {
+        const { error: rpcErr } = await supabase.rpc('clear_must_change_password')
+        if (rpcErr) throw rpcErr
       }
 
-      // 4) Refresca sesión y redirige a la ruta objetivo
+      const tryFallbackUpdate = async () => {
+        // Fallback: self-update (RLS debe permitir que el usuario actual actualice su propio profile)
+        const uid = me.user.id
+        const { error: dbErr } = await supabase
+          .from('profiles')
+          .update({ must_change_password: false, updated_at: new Date().toISOString() })
+          .eq('id', uid)
+        if (dbErr) throw dbErr
+      }
+
+      try {
+        await tryRpc()
+      } catch (rpcErr: any) {
+        // Errores típicos si el RPC no existe/no expuesto: 42883, PGRST116, 404
+        // Fallback no intrusivo que respeta RLS
+        await tryFallbackUpdate()
+      }
+
+      // 4) Refresca sesión (limpia cualquier claim/estado viejo) y redirige
       await supabase.auth.refreshSession()
       setOk(true)
+
+      // Opcional fuerte: cerrar sesión para evitar ecos en otros dispositivos
+      // await supabase.auth.signOut()
+
       setTimeout(() => router.replace(go), 400)
     } catch (e: any) {
       setErr(e?.message || 'No se pudo actualizar la contraseña.')
