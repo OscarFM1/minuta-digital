@@ -15,6 +15,7 @@ import styles from '@/styles/ChangePassword.module.css'
  *     must_change_password=false y first_login=false  (previene doble gate).
  * - Fallbacks si RLS bloquea: RPC clear_must_change_password / ack_first_login.
  * - Invalida SWR, refresh de sesión, signOut y redirección a login con next.
+ * - Cortacircuito local: sessionStorage.pwdChanged="1" para saltar gates 1 vez.
  * - Sin cambios a triggers/policies/metadata.
  */
 export default function CambiarPasswordPage() {
@@ -109,17 +110,20 @@ export default function CambiarPasswordPage() {
         try { await tryRpcAckFirst() } catch { /* ignore */ }
       }
 
-      // 3) Invalida cachés SWR y refresca/cierra sesión
+      // 3) Invalida cachés SWR y refresca sesión
       await mutate(['profile:me', uid]) // trae profile sin flags
       await mutate('auth:uid')
-
       await supabase.auth.refreshSession()
+
+      // 👇 Cortacircuito de gates en el siguiente render del cliente
+      try { sessionStorage.setItem('pwdChanged', '1') } catch { /* ignore */ }
+
       setOk(true)
 
-      // Cerrar sesión evita ecos del JWT previo y corta cualquier gate por cache
+      // 4) Cerrar sesión para evitar ecos del JWT previo
       await supabase.auth.signOut()
 
-      // 4) Redirigir limpio a login con feedback y return
+      // 5) Redirigir limpio a login con feedback y return
       const next = encodeURIComponent(go)
       router.replace(`/login?changed=1&next=${next}`)
     } catch (e: any) {
