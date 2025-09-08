@@ -31,6 +31,7 @@ import Head from 'next/head'
 import { AuthProvider } from '@/contexts/AuthContext'
 import PasswordChangeGate from '@/components/PasswordChangeGate'
 
+
 export default function MyApp({ Component, pageProps }: AppProps) {
   return (
     <>
