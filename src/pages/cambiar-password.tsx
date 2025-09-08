@@ -5,23 +5,8 @@ import { useRouter } from 'next/router'
 import { supabase } from '@/lib/supabaseClient'
 import styles from '@/styles/ChangePassword.module.css'
 
-/**
- * /cambiar-password
- * -----------------------------------------------------------------------------
- * - Requiere sesión activa (si no, redirige a /login).
- * - Cambia la contraseña del usuario actual en Supabase Auth.
- * - 🔑 FIX LOOP:
- *     1) Intenta RPC `public.clear_must_change_password()` (fuente única en profiles).
- *     2) Si el RPC no existe/queda inaccesible, fallback a UPDATE self en `profiles`.
- * - Refresca sesión para limpiar cualquier estado en memoria/JWT.
- * - Redirige a ?go=<ruta> o /minutas/estadisticas tras éxito.
- * - "Cancelar" = cerrar sesión y /login.
- * - 100% CSR. No toca Policies/Triggers/Metadata.
- */
 export default function CambiarPasswordPage() {
   const router = useRouter()
-
-  // Si no viene ?go=, ruta segura (evita /403 inexistente)
   const go =
     typeof router.query.go === 'string' && router.query.go.trim().length > 0
       ? router.query.go
@@ -30,14 +15,12 @@ export default function CambiarPasswordPage() {
   const [checking, setChecking] = useState(true)
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
-
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [ok, setOk] = useState(false)
 
   const MIN_LEN = 8
 
-  // ✅ Verifica sesión al montar. Si no hay usuario → /login
   useEffect(() => {
     ;(async () => {
       const { data, error } = await supabase.auth.getUser()
@@ -50,19 +33,15 @@ export default function CambiarPasswordPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // 🔙 Cancelar = cerrar sesión y volver a /login
   const onCancel = async () => {
     await supabase.auth.signOut()
     router.replace('/login')
   }
 
-  // 💾 Guardar nueva contraseña
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    setErr(null)
-    setOk(false)
+    setErr(null); setOk(false)
 
-    // Validaciones básicas en cliente
     if (!password || password.length < MIN_LEN) {
       setErr(`La contraseña debe tener al menos ${MIN_LEN} caracteres.`)
       return
@@ -74,48 +53,35 @@ export default function CambiarPasswordPage() {
 
     setLoading(true)
     try {
-      // 1) Seguridad: confirma que haya sesión válida
       const { data: me, error: meErr } = await supabase.auth.getUser()
       if (meErr || !me?.user) throw new Error('Sesión inválida, vuelve a iniciar sesión.')
 
-      // 2) Cambiar contraseña en Auth
+      // 1) Cambiar contraseña en Auth
       const { error: updErr } = await supabase.auth.updateUser({ password })
       if (updErr) throw updErr
 
-      // 3) 🔑 FIX LOOP — limpiar flag en profiles usando RPC, con fallback seguro
-      //    - Si tu función existe: CREATE OR REPLACE FUNCTION public.clear_must_change_password() ...
-      //    - Debe apagar profiles.must_change_password para el usuario actual (auth.uid()).
+      // 2) Apagar bandera: RPC → fallback UPDATE self
       const tryRpc = async () => {
-        const { error: rpcErr } = await supabase.rpc('clear_must_change_password')
-        if (rpcErr) throw rpcErr
+        const { error } = await supabase.rpc('clear_must_change_password')
+        if (error) throw error
       }
-
-      const tryFallbackUpdate = async () => {
-        // Fallback: self-update (RLS debe permitir que el usuario actual actualice su propio profile)
-        const uid = me.user.id
-        const { error: dbErr } = await supabase
+      const tryFallback = async () => {
+        const { error } = await supabase
           .from('profiles')
           .update({ must_change_password: false, updated_at: new Date().toISOString() })
-          .eq('id', uid)
-        if (dbErr) throw dbErr
+          .eq('id', me.user.id)
+        if (error) throw error
       }
-
       try {
         await tryRpc()
-      } catch (rpcErr: any) {
-        // Errores típicos si el RPC no existe/no expuesto: 42883, PGRST116, 404
-        // Fallback no intrusivo que respeta RLS
-        await tryFallbackUpdate()
+      } catch {
+        await tryFallback()
       }
 
-      // 4) Refresca sesión (limpia cualquier claim/estado viejo) y redirige
+      // 3) Refrescar sesión y redirigir limpio
       await supabase.auth.refreshSession()
       setOk(true)
-
-      // Opcional fuerte: cerrar sesión para evitar ecos en otros dispositivos
-      // await supabase.auth.signOut()
-
-      setTimeout(() => router.replace(go), 400)
+      setTimeout(() => router.replace(go), 300)
     } catch (e: any) {
       setErr(e?.message || 'No se pudo actualizar la contraseña.')
     } finally {
@@ -131,9 +97,7 @@ export default function CambiarPasswordPage() {
       <div className={styles.cpContainer}>
         <div className={styles.cpCard} role="region" aria-label="Cambiar contraseña">
           <h1 className={styles.cpTitle}>Cambiar contraseña</h1>
-          <p className={styles.cpSubtitle}>
-            Define una nueva contraseña segura para tu cuenta.
-          </p>
+          <p className={styles.cpSubtitle}>Define una nueva contraseña segura para tu cuenta.</p>
 
           {err && <div className={styles.cpError} role="alert">{err}</div>}
           {ok && <div className={styles.cpSuccess} role="status">Contraseña actualizada correctamente.</div>}
@@ -150,9 +114,7 @@ export default function CambiarPasswordPage() {
                 aria-label="Nueva contraseña"
                 autoFocus
               />
-              <small className={styles.cpHint}>
-                Usa mayúsculas, minúsculas, números y símbolos.
-              </small>
+              <small className={styles.cpHint}>Usa mayúsculas, minúsculas, números y símbolos.</small>
             </label>
 
             <label className={styles.cpLabel}>
@@ -168,20 +130,10 @@ export default function CambiarPasswordPage() {
             </label>
 
             <div className={styles.cpActions}>
-              <button
-                type="submit"
-                className={styles.cpButton}
-                disabled={loading}
-                aria-busy={loading}
-              >
+              <button type="submit" className={styles.cpButton} disabled={loading} aria-busy={loading}>
                 {loading ? 'Guardando…' : 'Guardar nueva contraseña'}
               </button>
-
-              <button
-                type="button"
-                className={styles.cpButtonSecondary}
-                onClick={onCancel}
-              >
+              <button type="button" className={styles.cpButtonSecondary} onClick={onCancel}>
                 Cancelar
               </button>
             </div>
