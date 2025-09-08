@@ -1,4 +1,13 @@
-// src/hooks/usePasswordChangeGate.ts
+/**
+ * usePasswordChangeGate.ts
+ * -----------------------------------------------------------------------------
+ * Gatea SOLO por profiles.must_change_password === true.
+ * - Se auto-exime en /cambiar-password, /login y /logout.
+ * - Salta UNA VEZ si detecta:
+ *     a) ?changed=1 en /login (primer render post-cambio), o
+ *     b) sessionStorage.pwdChanged === '1' (cortacircuito de cliente).
+ */
+
 import { useEffect, useMemo } from 'react'
 import { useRouter } from 'next/router'
 import useSWR, { mutate } from 'swr'
@@ -33,10 +42,22 @@ export function usePasswordChangeGate() {
     [pathname]
   )
 
-  // Si venimos de login con changed=1, saltar una vez el gate
-  const skipOnce = router.pathname.startsWith('/login') &&
-                   typeof router.query.changed === 'string' &&
-                   router.query.changed === '1'
+  // Saltar una vez si venimos del login con changed=1
+  const skipFromLoginOnce =
+    pathname.startsWith('/login') &&
+    typeof router.query.changed === 'string' &&
+    router.query.changed === '1'
+
+  // Cortacircuito en memoria de sesión (se limpia al usarlo)
+  const shouldSkipBySessionFlag = () => {
+    try {
+      if (sessionStorage.getItem('pwdChanged') === '1') {
+        sessionStorage.removeItem('pwdChanged')
+        return true
+      }
+    } catch {/* ignore */}
+    return false
+  }
 
   useEffect(() => {
     const { data: sub } = supabase.auth.onAuthStateChange(() => {
@@ -57,12 +78,16 @@ export function usePasswordChangeGate() {
   )
 
   useEffect(() => {
-    if (isExempt || skipOnce) return
+    if (isExempt) return
     if (!profile) return
+
+    // Salto por primer render post-cambio (query) o por flag de sesión
+    if (skipFromLoginOnce || shouldSkipBySessionFlag()) return
+
     if (profile.must_change_password) {
       if (router.pathname.startsWith('/cambiar-password')) return
       const go = encodeURIComponent(router.asPath || '/minutas/estadisticas')
       router.replace(`/cambiar-password?go=${go}`)
     }
-  }, [isExempt, skipOnce, profile, router])
+  }, [isExempt, profile, router, skipFromLoginOnce])
 }
