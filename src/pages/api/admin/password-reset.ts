@@ -4,8 +4,8 @@
  * -----------------------------------------------------------------------------
  * - CORS unificado con /lib/allowedOrigins (wildcards + fallback proto/host).
  * - Preflight OPTIONS → 204 con headers CORS.
- * - POST: { login?: string; password?: string }
- *   - Acepta "login" o "correo"; si no trae "@", usa @login.local (ENV).
+ * - POST: { login?: string; email?: string; password?: string }
+ *   - Acepta "login" o "email"; si no trae "@", usa @LOGIN_DOMAIN.
  *   - Busca usuario via Admin API (service_role).
  *   - Upsert en profiles: must_change_password=true.
  *   - Actualiza contraseña en Auth.
@@ -87,19 +87,33 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
       }
     }
 
-    // Payload
-    const body = (req.body ?? {}) as { login?: string; password?: string }
-    const rawLogin = typeof body.login === 'string' ? body.login.trim() : ''
+    // ---------- Parseo robusto del payload ----------
+    // Soporta:
+    // - JSON: { login, email, password }
+    // - x-www-form-urlencoded: login=...&password=...
+    // - Cualquier mezcla razonable (si body llega como string, intentamos parsear)
+    let body: any = req.body ?? {}
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body) } catch { /* ignorar; puede ser form body stringificado por algún cliente */ }
+    }
+    const rawLogin: string =
+      (typeof body.login === 'string' && body.login.trim()) ||
+      (typeof body.email === 'string' && body.email.trim()) ||
+      ''
+
     if (!rawLogin) {
       return res.status(400).json({ ok: false, error: 'login requerido' })
     }
+
+    const customPassword: string | undefined =
+      (typeof body.password === 'string' && body.password.length > 0) ? body.password : undefined
 
     // Normaliza a email
     const email = rawLogin.includes('@')
       ? rawLogin.toLowerCase()
       : `${rawLogin.toLowerCase()}@${LOGIN_DOMAIN}`
 
-    // Admin client (service role)
+    // ---------- Supabase Admin ----------
     const admin = createClient(URL, SERVICE, {
       auth: { persistSession: false, autoRefreshToken: false },
     })
@@ -114,9 +128,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
 
     // Contraseña temporal (si no viene una)
     const temp =
-      typeof body.password === 'string' && body.password.length > 0
-        ? body.password
-        : `Tmp-${Math.random().toString(36).slice(2, 8)}-${Math.random().toString(36).slice(2, 6)}!`
+      customPassword ||
+      `Tmp-${Math.random().toString(36).slice(2, 8)}-${Math.random().toString(36).slice(2, 6)}!`
 
     // Marca “cambiar contraseña al entrar”
     const { error: upsertErr } = await admin
