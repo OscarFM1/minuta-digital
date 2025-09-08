@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import Head from 'next/head'
 import { useRouter } from 'next/router'
 import { supabase } from '@/lib/supabaseClient'
+import { mutate } from 'swr'
 import styles from '@/styles/ChangePassword.module.css'
 
 export default function CambiarPasswordPage() {
@@ -18,7 +19,6 @@ export default function CambiarPasswordPage() {
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [ok, setOk] = useState(false)
-
   const MIN_LEN = 8
 
   useEffect(() => {
@@ -56,11 +56,11 @@ export default function CambiarPasswordPage() {
       const { data: me, error: meErr } = await supabase.auth.getUser()
       if (meErr || !me?.user) throw new Error('Sesión inválida, vuelve a iniciar sesión.')
 
-      // 1) Cambiar contraseña en Auth
+      // 1) Cambiar contraseña
       const { error: updErr } = await supabase.auth.updateUser({ password })
       if (updErr) throw updErr
 
-      // 2) Apagar bandera: RPC → fallback UPDATE self
+      // 2) Apagar flag: RPC → fallback UPDATE self
       const tryRpc = async () => {
         const { error } = await supabase.rpc('clear_must_change_password')
         if (error) throw error
@@ -72,16 +72,20 @@ export default function CambiarPasswordPage() {
           .eq('id', me.user.id)
         if (error) throw error
       }
-      try {
-        await tryRpc()
-      } catch {
-        await tryFallback()
-      }
+      try { await tryRpc() } catch { await tryFallback() }
 
-      // 3) Refrescar sesión y redirigir limpio
+      // 3) Invalida caché de perfil SIEMPRE (SWR)
+      await mutate(['profile:me', me.user.id])
+      await mutate('auth:uid')
+
+      // 4) Refresca sesión y cierra sesión para evitar ecos del JWT anterior
       await supabase.auth.refreshSession()
       setOk(true)
-      setTimeout(() => router.replace(go), 300)
+      await supabase.auth.signOut()
+
+      // 5) Redirige limpio a login con feedback y destino
+      const next = encodeURIComponent(go)
+      router.replace(`/login?changed=1&next=${next}`)
     } catch (e: any) {
       setErr(e?.message || 'No se pudo actualizar la contraseña.')
     } finally {
