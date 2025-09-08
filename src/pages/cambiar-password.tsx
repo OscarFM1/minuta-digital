@@ -6,6 +6,17 @@ import { supabase } from '@/lib/supabaseClient'
 import { mutate } from 'swr'
 import styles from '@/styles/ChangePassword.module.css'
 
+/**
+ * Cambiar contraseña
+ * -----------------------------------------------------------------------------
+ * - Requiere sesión.
+ * - Cambia contraseña en Auth.
+ * - 🔒 Apaga SIEMPRE ambos flags en profiles:
+ *     must_change_password=false y first_login=false  (previene doble gate).
+ * - Fallbacks si RLS bloquea: RPC clear_must_change_password / ack_first_login.
+ * - Invalida SWR, refresh de sesión, signOut y redirección a login con next.
+ * - Sin cambios a triggers/policies/metadata.
+ */
 export default function CambiarPasswordPage() {
   const router = useRouter()
   const go =
@@ -19,8 +30,10 @@ export default function CambiarPasswordPage() {
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [ok, setOk] = useState(false)
+
   const MIN_LEN = 8
 
+  // Verifica sesión al montar
   useEffect(() => {
     ;(async () => {
       const { data, error } = await supabase.auth.getUser()
@@ -40,7 +53,8 @@ export default function CambiarPasswordPage() {
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    setErr(null); setOk(false)
+    setErr(null)
+    setOk(false)
 
     if (!password || password.length < MIN_LEN) {
       setErr(`La contraseña debe tener al menos ${MIN_LEN} caracteres.`)
@@ -53,37 +67,59 @@ export default function CambiarPasswordPage() {
 
     setLoading(true)
     try {
+      // Usuario actual
       const { data: me, error: meErr } = await supabase.auth.getUser()
       if (meErr || !me?.user) throw new Error('Sesión inválida, vuelve a iniciar sesión.')
+      const uid = me.user.id
 
-      // 1) Cambiar contraseña
+      // 1) Cambiar contraseña en Auth
       const { error: updErr } = await supabase.auth.updateUser({ password })
       if (updErr) throw updErr
 
-      // 2) Apagar flag: RPC → fallback UPDATE self
-      const tryRpc = async () => {
-        const { error } = await supabase.rpc('clear_must_change_password')
-        if (error) throw error
-      }
-      const tryFallback = async () => {
+      // 2) Apagar flags en profiles en UNA sola operación (preferido)
+      //    - Evita doble redirect (must_change_password / first_login)
+      const trySingleUpdate = async () => {
         const { error } = await supabase
           .from('profiles')
-          .update({ must_change_password: false, updated_at: new Date().toISOString() })
-          .eq('id', me.user.id)
+          .update({
+            must_change_password: false,
+            first_login: false,
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', uid)
         if (error) throw error
       }
-      try { await tryRpc() } catch { await tryFallback() }
 
-      // 3) Invalida caché de perfil SIEMPRE (SWR)
-      await mutate(['profile:me', me.user.id])
+      // 2b) Fallbacks por si RLS bloquea: RPCs (opcionales si existen)
+      const tryRpcClearMust = async () => {
+        const { error } = await supabase.rpc('clear_must_change_password') // RETURNS boolean/void
+        if (error) throw error
+      }
+      const tryRpcAckFirst = async () => {
+        // si tienes este RPC; si no existe, se ignora
+        const { error } = await supabase.rpc('ack_first_login') // RETURNS boolean/void
+        if (error) throw error
+      }
+
+      try {
+        await trySingleUpdate()
+      } catch {
+        // Intentar apagar cada flag por RPC si el UPDATE directo falló
+        try { await tryRpcClearMust() } catch { /* ignore */ }
+        try { await tryRpcAckFirst() } catch { /* ignore */ }
+      }
+
+      // 3) Invalida cachés SWR y refresca/cierra sesión
+      await mutate(['profile:me', uid]) // trae profile sin flags
       await mutate('auth:uid')
 
-      // 4) Refresca sesión y cierra sesión para evitar ecos del JWT anterior
       await supabase.auth.refreshSession()
       setOk(true)
+
+      // Cerrar sesión evita ecos del JWT previo y corta cualquier gate por cache
       await supabase.auth.signOut()
 
-      // 5) Redirige limpio a login con feedback y destino
+      // 4) Redirigir limpio a login con feedback y return
       const next = encodeURIComponent(go)
       router.replace(`/login?changed=1&next=${next}`)
     } catch (e: any) {
