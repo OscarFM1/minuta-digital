@@ -1,17 +1,12 @@
 /**
  * useFirstLoginGate.ts
  * -----------------------------------------------------------------------------
- * Fuerza redirección a /cambiar-password cuando:
- *  1) profiles.must_change_password === true  (contraseña temporal)  ← PRIORIDAD
- *  2) first_login === true (desde user_metadata o profiles.first_login)
+ * Fuerza redirección a /cambiar-password SOLO cuando es PRIMER INICIO:
+ *  - fuente única: profiles.first_login === true
+ *  - (fallback opcional) user_metadata.first_login si no hay fila en profiles
  *
- * Mantiene:
- *  - Respeta ?go= (regresa a la intención original).
- *  - Evita bucles en /cambiar-password, /login, /logout.
- *
- * Requisitos:
- *  - RLS en profiles que permita SELECT del propio registro:
- *      USING (auth.uid() = id)
+ * NO revisa must_change_password (eso es de usePasswordChangeGate).
+ * Respeta ?go= y evita bucles en /cambiar-password, /login, /logout.
  */
 
 import { useEffect } from 'react'
@@ -33,36 +28,37 @@ export function useFirstLoginGate() {
       router.pathname.startsWith('/login') ||
       router.pathname.startsWith('/logout')
 
+    // Si venimos del login con changed=1 (acaba de cambiar la clave),
+    // saltar una vez para evitar re-gate por caches.
+    const skipOnce =
+      router.pathname.startsWith('/login') &&
+      typeof router.query.changed === 'string' &&
+      router.query.changed === '1'
+
     const check = async () => {
       try {
         const { data } = await supabase.auth.getSession()
         const session = data.session
         const uid = session?.user?.id
 
-        if (!mounted || isExemptRoute || !uid) return
+        if (!mounted || isExemptRoute || skipOnce || !uid) return
 
-        // ---- 1) MUST CHANGE PASSWORD (desde BD) ----
+        // ---- FUENTE ÚNICA: profiles.first_login ----
         const { data: prof } = await supabase
           .from('profiles')
-          .select('id, must_change_password, first_login')
-          .eq('id', uid) // tu PK es "id"
+          .select('id, first_login')
+          .eq('id', uid)   // PK = id
           .single()
 
-        const mustChange = !!prof?.must_change_password
-
-        // ---- 2) FIRST LOGIN (metadata o BD) ----
-        const metaFirst =
-          truthy(session?.user?.user_metadata?.first_login) ||
-          truthy((session?.user as any)?.app_metadata?.first_login)
-
+        // Preferimos profiles; solo si no hay fila, miramos metadata como fallback
         const profileFirst = truthy(prof?.first_login)
+        const metaFirst = !prof ? truthy(session?.user?.user_metadata?.first_login) : false
 
-        const isFirstLogin = !!(metaFirst || profileFirst)
+        const isFirstLogin = profileFirst || metaFirst
 
-        if (mustChange || isFirstLogin) {
+        if (isFirstLogin) {
           const go = router.asPath || '/mis-minutas'
-          const reason = mustChange ? 'temp' : 'first'
-          router.replace(`/cambiar-password?reason=${reason}&go=${encodeURIComponent(go)}`)
+          router.replace(`/cambiar-password?reason=first&go=${encodeURIComponent(go)}`)
         }
       } catch {
         // no-op
