@@ -1,27 +1,27 @@
 // src/pages/_app.tsx
 /**
  * Next.js App Root
- * ----------------
+ * -----------------------------------------------------------------------------
  * Propósito:
- *   - Cargar estilos globales y Bootstrap.
- *   - Proveer el contexto de autenticación (AuthProvider) a TODA la app.
+ *  - Cargar estilos globales y Bootstrap.
+ *  - Proveer el contexto de autenticación (AuthProvider) a TODA la app.
+ *  - Forzar cambio de contraseña si el perfil tiene must_change_password=true
+ *    mediante <PasswordChangeGate>.
  *
  * Decisiones clave:
- *   1) NO se hacen redirecciones ni verificaciones de sesión en _app:
- *      - Evita bucles de navegación y estados "pegados" (e.g. "Verificando sesión...").
- *      - La sesión se resuelve en un único lugar (AuthProvider) y las páginas
- *        PRIVADAS usan <SessionGate requireAuth> para protegerse.
- *   2) Mantiene el render simple y predecible: _app monta el contexto y renderiza
- *      la página; nada más.
+ *  1) _app NO hace lógicas de auth complejas ni redirecciones por cuenta propia.
+ *     El flujo se delega a:
+ *       - AuthProvider → estado de sesión consistente.
+ *       - PasswordChangeGate → redirige a /cambiar-password cuando aplica.
+ *       - Las páginas privadas se protegen con <SessionGate requireAuth>.
  *
  * Requisitos:
- *   - Debes tener creado: src/contexts/AuthContext.tsx (AuthProvider).
- *   - En las páginas privadas usa: import SessionGate from '@/components/SessionGate'
- *     y envuelve el contenido con <SessionGate requireAuth>...</SessionGate>.
+ *  - src/contexts/AuthContext.tsx (AuthProvider).
+ *  - src/components/PasswordChangeGate.tsx (envuelve el hook usePasswordChangeGate).
  *
  * Beneficios:
- *   - Evita "colgados" en login y en rutas protegidas.
- *   - Un único estado de sesión para toda la app (estable y observable).
+ *  - Evita bucles y “cuelgues” de verificación.
+ *  - Aísla responsabilidades: sesión, gate por password temporal y protección de rutas.
  */
 
 import '@/styles/globals.css'
@@ -29,6 +29,7 @@ import 'bootstrap/dist/css/bootstrap.min.css'
 import type { AppProps } from 'next/app'
 import Head from 'next/head'
 import { AuthProvider } from '@/contexts/AuthContext'
+import PasswordChangeGate from '@/components/PasswordChangeGate'
 
 export default function MyApp({ Component, pageProps }: AppProps) {
   return (
@@ -38,11 +39,13 @@ export default function MyApp({ Component, pageProps }: AppProps) {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
       </Head>
 
-      {/* Proveedor de sesión/usuario para toda la app.
-         - NO hace redirects aquí.
-         - Las páginas privadas se protegen con <SessionGate requireAuth>. */}
+      {/* Proveedor de sesión/usuario para toda la app */}
       <AuthProvider>
-        <Component {...pageProps} />
+        {/* Gate que obliga a cambiar contraseña si el perfil lo requiere.
+            Se auto-exime en /cambiar-password, /login y /logout (vía hook). */}
+        <PasswordChangeGate>
+          <Component {...pageProps} />
+        </PasswordChangeGate>
       </AuthProvider>
     </>
   )
