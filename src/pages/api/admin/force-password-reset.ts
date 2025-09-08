@@ -1,2 +1,3 @@
-// /src/pages/api/admin/force-password-reset.ts
-export { default } from './password-reset'
+// Alias estable: /api/admin/force-password-reset → /api/admin/password-reset
+import handler from './password-reset'
+export default handler
