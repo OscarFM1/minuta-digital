@@ -1,12 +1,13 @@
 /**
  * useFirstLoginGate.ts
  * -----------------------------------------------------------------------------
- * Fuerza redirección a /cambiar-password SOLO cuando es PRIMER INICIO:
- *  - fuente única: profiles.first_login === true
- *  - (fallback opcional) user_metadata.first_login si no hay fila en profiles
+ * Fuerza redirección a /cambiar-password SOLO para PRIMER INICIO:
+ *  - Fuente principal: profiles.first_login === true
+ *  - Fallback: user_metadata.first_login si no existe fila en profiles
  *
  * NO revisa must_change_password (eso es de usePasswordChangeGate).
- * Respeta ?go= y evita bucles en /cambiar-password, /login, /logout.
+ * Evita bucles en /cambiar-password, /login y /logout.
+ * Cortacircuito: salta UNA vez si detecta /login?changed=1 o sessionStorage.pwdChanged="1".
  */
 
 import { useEffect } from 'react'
@@ -28,12 +29,24 @@ export function useFirstLoginGate() {
       router.pathname.startsWith('/login') ||
       router.pathname.startsWith('/logout')
 
-    // Si venimos del login con changed=1 (acaba de cambiar la clave),
-    // saltar una vez para evitar re-gate por caches.
-    const skipOnce =
+    // a) Si venimos del login con changed=1, saltar una vez
+    const skipFromLoginOnce =
       router.pathname.startsWith('/login') &&
       typeof router.query.changed === 'string' &&
       router.query.changed === '1'
+
+    // b) Cortacircuito en memoria de sesión (lo limpia al usarlo)
+    const shouldSkipBySessionFlag = () => {
+      try {
+        if (sessionStorage.getItem('pwdChanged') === '1') {
+          sessionStorage.removeItem('pwdChanged')
+          return true
+        }
+      } catch {
+        /* ignore */
+      }
+      return false
+    }
 
     const check = async () => {
       try {
@@ -41,16 +54,17 @@ export function useFirstLoginGate() {
         const session = data.session
         const uid = session?.user?.id
 
-        if (!mounted || isExemptRoute || skipOnce || !uid) return
+        if (!mounted || isExemptRoute || !uid) return
+        if (skipFromLoginOnce || shouldSkipBySessionFlag()) return
 
         // ---- FUENTE ÚNICA: profiles.first_login ----
         const { data: prof } = await supabase
           .from('profiles')
           .select('id, first_login')
-          .eq('id', uid)   // PK = id
+          .eq('id', uid) // PK = id
           .single()
 
-        // Preferimos profiles; solo si no hay fila, miramos metadata como fallback
+        // Preferimos profiles; si no existe fila, miramos metadata como fallback
         const profileFirst = truthy(prof?.first_login)
         const metaFirst = !prof ? truthy(session?.user?.user_metadata?.first_login) : false
 
@@ -65,7 +79,7 @@ export function useFirstLoginGate() {
       }
     }
 
-    // primera comprobación + recheck al cambiar estado de auth
+    // Primera comprobación + recheck al cambiar estado de auth
     check()
     const { data: sub } = supabase.auth.onAuthStateChange(() => check())
 
