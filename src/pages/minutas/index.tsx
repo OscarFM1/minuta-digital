@@ -1,8 +1,8 @@
 /**
  * /minutas — Vista GLOBAL para ADMIN / SUPER_ADMIN (solo lectura)
  * -----------------------------------------------------------------------------
- * - Gating por rol con <RequireRole allow={['admin','super_admin']}>.
- * - Misma UI para TODOS los administradores (Esteban, operaciones, etc.).
+ * - Gating por rol en SSR con withAuthSSR({ allowRoles:['admin','super_admin'] }).
+ * - En cliente mantiene <RequireRole> como “soft guard” (oculta UI si algo cambia).
  * - Filtros: usuario (datalist) + rango de fechas.
  * - Realtime: refresca al cambiar 'minute'.
  * - Listado con MinuteCard en mode="read" (evidencias en RO).
@@ -22,7 +22,9 @@ import styles from '@/styles/Minutas.module.css'
 import { useFirstLoginGate } from '@/hooks/useFirstLoginGate'
 import AdminResetPassword from '@/components/AdminResetPassword'
 import RequireRole from '@/components/RequireRole'
-import { withAuthAndPwdGate } from '@/lib/withAuthSSR'
+
+// ✅ Nuevo guard SSR que evita 500 y respeta roles
+import { withAuthSSR } from '@/lib/ssr-guard'
 
 type Filters = { desde?: string; hasta?: string; user?: string }
 type UserOption = { value: string; label: string }
@@ -223,18 +225,6 @@ function AdminMinutasView() {
     </Container>
   )
 }
-export const getServerSideProps = withAuthAndPwdGate(async (ctx, supabase, user) => {
-  const { data: prof } = await supabase
-    .from('profiles')
-    .select('role')
-    .eq('id', user.id)
-    .single()
 
-  if (prof?.role !== 'admin' && prof?.role !== 'super_admin') {
-    return {
-      redirect: { destination: '/mis-minutas?unauthorized=1', permanent: false },
-    }
-  }
-
-  return { props: {} }
-})
+// ✅ SSR: solo ADMIN / SUPER_ADMIN, sin riesgo de 500
+export const getServerSideProps = withAuthSSR({ allowRoles: ['admin', 'super_admin'] })

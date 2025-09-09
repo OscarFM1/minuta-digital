@@ -1,19 +1,9 @@
 // src/pages/minutas/estadisticas.tsx
 /**
  * Estadísticas mensuales (ADMIN) + Exportación CSV/XLSX con gráficos (imágenes).
- * 🔒 Protegida por rol: admin | super_admin (RequireRole)
- * - Se elimina cualquier guard por email; usamos gating por rol y RLS.
+ * 🔒 Protegida por rol en SSR: admin | super_admin (withAuthSSR).
  * - Excluye del conteo a usuarios de PRUEBAS (config por ENV).
- *
- * ENV relevantes:
- * - NEXT_PUBLIC_LOGIN_DOMAIN: dominio de login local (por defecto 'login.local').
- * - NEXT_PUBLIC_STATS_EXCLUDE_EMAILS: lista coma-separada de emails a EXCLUIR de estadísticas
- *     EJ: "pruebas@login.local,qa1@login.local"
- * - NEXT_PUBLIC_STATS_EXTRA_EMAILS: correos extra a incluir en tablero (además de los oficiales).
- *
- * Defensa en profundidad:
- * - Filtro en BD: .in('created_by_email', ALLOWED_EMAILS) + .neq(...) por cada EXCLUIDO
- * - Filtro en cliente: sanity-check para asegurar que excluidos no cuenten aunque cambie ALLOWED_EMAILS.
+ * - Recharts / exceljs solo en cliente (dynamic ssr:false).
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -25,11 +15,10 @@ import {
 } from 'react-bootstrap'
 import { FiArrowLeft, FiInfo } from 'react-icons/fi'
 import { supabase } from '@/lib/supabaseClient'
-import RequireRole from '@/components/RequireRole' // 🔒 GATING por rol
+import RequireRole from '@/components/RequireRole' // soft guard de UI
 
-// ⬇️ NUEVO: imports para el guard SSR robusto
-import type { GetServerSideProps, GetServerSidePropsContext } from 'next'
-import { createServerSupabaseClient } from '@supabase/auth-helpers-nextjs'
+// ✅ Guard SSR que evita 500 y respeta roles
+import { withAuthSSR } from '@/lib/ssr-guard'
 
 // ---------- Recharts: dynamic con { default: ... } + ssr:false ----------
 const ResponsiveContainer = dynamic(
@@ -87,7 +76,7 @@ const Cell = dynamic(
   { ssr: false }
 )
 
-// Tooltip con descripciones (cliente). Si no lo quieres, deja <Tooltip />
+// Tooltip custom (cliente)
 const ChartTooltip = dynamic(
   () => import('@/components/charts/ChartTooltip.client').then(m => ({ default: m.default })),
   { ssr: false }
@@ -155,7 +144,7 @@ function monthEdges(ym: string) {
   const [y, m] = ym.split('-').map(Number)
   const start = new Date(y, m - 1, 1)
   const end = new Date(y, m, 0)
-  const toISO = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  const toISO = (d: Date) => `${d.getFullYear()}-${d.getMonth() + 1 >= 10 ? d.getMonth() + 1 : `0${d.getMonth() + 1}`}-${d.getDate() >= 10 ? d.getDate() : `0${d.getDate()}`}`
   return { start, end, startISO: toISO(start), endISO: toISO(end) }
 }
 
@@ -188,7 +177,7 @@ function minToHhmm(min: number) {
   const M = Math.abs(min)
   const hh = Math.floor(M / 60)
   const mm = M % 60
-  return `${sign}${pad(hh)}:${pad(mm)}`
+  return `${sign}${hh < 10 ? `0${hh}` : hh}:${mm < 10 ? `0${mm}` : mm}`
 }
 
 // ---------------- Tipos ----------------
@@ -267,7 +256,8 @@ export default function AdminEstadisticasPage() {
   const router = useRouter()
   const [ym, setYm] = useState<string>(() => {
     const d = new Date()
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`
+    const mm = d.getMonth() + 1
+    return `${d.getFullYear()}-${mm >= 10 ? mm : `0${mm}`}`
   })
   const { start, end, startISO, endISO } = monthEdges(ym)
 
@@ -340,8 +330,9 @@ export default function AdminEstadisticasPage() {
   }, [startISO, endISO])
 
   // Agregación por usuario (solo los oficiales en USERS)
-  const dataByUser: UserAgg[] = useMemo(() => {
-    const base: Record<string, UserAgg> = {}
+  type UserAggLocal = UserAgg
+  const dataByUser: UserAggLocal[] = useMemo(() => {
+    const base: Record<string, UserAggLocal> = {}
     for (const u of USERS) {
       base[u.email] = {
         email: u.email, name: u.name,
@@ -355,8 +346,8 @@ export default function AdminEstadisticasPage() {
 
     for (const r of rows) {
       const email = (r.created_by_email ?? '').toLowerCase()
-      if (!email || !(email in base)) continue // Ignora todo lo que no está en USERS (incluye testers)
-      if (STATS_EXCLUDE_EMAILS.includes(email)) continue // defensa extra (no debería entrar por filtros)
+      if (!email || !(email in base)) continue // Ignora no-oficiales
+      if (STATS_EXCLUDE_EMAILS.includes(email)) continue
 
       const date = r.date ?? ''
       if (!date) continue
@@ -379,7 +370,7 @@ export default function AdminEstadisticasPage() {
         .sort((a, b) => a[0].localeCompare(b[0]))
 
       let gross = 0, rest = 0, net = 0, idle = 0, eff = 0
-      const byDay: UserAgg['byDay'] = []
+      const byDay: UserAggLocal['byDay'] = []
 
       for (const [d, g] of days) {
         const restD = g > 0 ? REST_PER_DAY_MIN : 0
@@ -535,14 +526,13 @@ export default function AdminEstadisticasPage() {
   /* ============================================================ */
 
   return (
-    <RequireRole allow={['admin','super_admin']}> {/* 🔒 Gating por rol */}
+    <RequireRole allow={['admin','super_admin']}>
       <Head><title>Estadísticas mensuales — Admin</title></Head>
 
       <Container className="py-4">
         {/* Volver + Título + Selector Mes con Nudge */}
         <Row className="align-items-center mb-3">
           <Col className="d-flex align-items-center gap-3">
-            {/* Botón Volver estilizado */}
             <button
               type="button"
               className="backBtn"
@@ -559,23 +549,12 @@ export default function AdminEstadisticasPage() {
           </Col>
 
           <Col xs="12" md="auto" className="d-flex align-items-end gap-3 mt-3 mt-md-0">
-            {showNudge && (
-              <div className="stats-nudge" aria-live="polite">
-                <span className="pulse" aria-hidden />
-                <span className="tip">
-                  <FiInfo style={{ marginRight: 6 }} aria-hidden />
-                  Tip: filtra por <strong>mes</strong>
-                </span>
-                <span className="arrow" aria-hidden>➡</span>
-              </div>
-            )}
-
             <Form.Group controlId="monthSelect" className="m-0">
               <Form.Label className="mb-1">Mes</Form.Label>
               <Form.Control
                 type="month"
                 value={ym}
-                onChange={(e) => { setYm(e.target.value); setShowNudge(false) }}
+                onChange={(e) => { setYm(e.target.value) }}
               />
             </Form.Group>
           </Col>
@@ -688,10 +667,7 @@ export default function AdminEstadisticasPage() {
                     <h6 className="mb-2">Composición diaria (horas)</h6>
                     <div ref={chartDailyRef} style={{ width: '100%', height: 260, background: '#fff' }}>
                       <ResponsiveContainer>
-                        <ComposedChart
-                          data={detailDailyChart}
-                          margin={{ top: 10, right: 20, left: 0, bottom: 0 }}
-                        >
+                        <ComposedChart data={detailDailyChart} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
                           <CartesianGrid strokeDasharray="3 3" />
                           <XAxis dataKey="date" />
                           <YAxis unit="h" />
@@ -700,14 +676,7 @@ export default function AdminEstadisticasPage() {
                           <Bar dataKey="restH"      name="Descansos"                stackId="a" fill={PALETTE.rest} />
                           <Bar dataKey="idleH"      name="Tiempo muerto (promedio)" stackId="a" fill={PALETTE.idle} />
                           <Bar dataKey="effectiveH" name="Efectivo"                 stackId="a" fill={PALETTE.effective} />
-                          <Line
-                            type="monotone"
-                            dataKey="effectiveH"
-                            name="Efectivo (línea)"
-                            stroke={PALETTE.effective}
-                            strokeWidth={2}
-                            dot={false}
-                          />
+                          <Line type="monotone" dataKey="effectiveH" name="Efectivo (línea)" stroke={PALETTE.effective} strokeWidth={2} dot={false} />
                         </ComposedChart>
                       </ResponsiveContainer>
                     </div>
@@ -769,9 +738,7 @@ export default function AdminEstadisticasPage() {
                     <thead>
                       <tr>
                         <th>Fecha</th>
-                        <th className="text-end" title="Tiempo total entre inicio y fin por día, sin descuentos.">
-                          Bruto
-                        </th>
+                        <th className="text-end" title="Tiempo total entre inicio y fin por día, sin descuentos.">Bruto</th>
                         <th className="text-end">Descansos</th>
                         <th className="text-end">Tiempo muerto (promedio)</th>
                         <th className="text-end">Efectivo</th>
@@ -801,127 +768,16 @@ export default function AdminEstadisticasPage() {
 
       {/* Estilos del nudge y del botón Volver */}
       <style jsx>{`
-        /* --- NUDGE (filtro por mes) --- */
-        .stats-nudge {
-          display: inline-flex;
-          align-items: center;
-          gap: .5rem;
-          user-select: none;
-          pointer-events: none;
-        }
-        .pulse {
-          width: 10px;
-          height: 10px;
-          border-radius: 9999px;
-          background: #009ada;
-          box-shadow: 0 0 0 0 rgba(0, 154, 218, 0.6);
-          animation: pulseAnim 1.8s ease-out infinite;
-        }
-        @keyframes pulseAnim {
-          0%   { box-shadow: 0 0 0 0 rgba(0,154,218,.6); }
-          70%  { box-shadow: 0 0 0 12px rgba(0,154,218,0); }
-          100% { box-shadow: 0 0 0 0 rgba(0,154,218,0); }
-        }
-        .tip {
-          background: #e6f7ff;
-          color: #035d82;
-          border: 1px solid rgba(0, 154, 218, .25);
-          font-weight: 600;
-          padding: 3px 10px;
-          border-radius: 999px;
-          font-size: .85rem;
-          white-space: nowrap;
-        }
-        .arrow {
-          font-size: 1.25rem;
-          line-height: 1;
-          transform: translateY(-1px);
-        }
-        @media (max-width: 768px) {
-          .arrow { display: none; }
-          .tip { font-size: .8rem; }
-        }
-
-        /* --- Botón Volver (branding #009ada) --- */
         .backBtn {
-          display: inline-flex;
-          align-items: center;
-          gap: .5rem;
-          padding: .35rem .6rem;
-          border-radius: 9999px;
-          background: transparent;
-          color: #009ada;
-          border: 1px solid transparent;
-          font-weight: 600;
-          line-height: 1;
-          cursor: pointer;
-          text-decoration: none;
+          display: inline-flex; align-items: center; gap: .5rem;
+          padding: .35rem .6rem; border-radius: 9999px; background: transparent;
+          color: #009ada; border: 1px solid transparent; font-weight: 600; line-height: 1; cursor: pointer;
         }
-        .backBtn :global(svg) {
-          transform: translateY(-1px);
-        }
-        .backBtn:hover {
-          background: #e6f7ff;
-          border-color: rgba(0,154,218,.25);
-          text-decoration: none;
-        }
-        .backBtn:focus {
-          outline: none;
-          box-shadow: 0 0 0 .2rem rgba(0,154,218,.35);
-        }
+        .backBtn:hover { background: #e6f7ff; border-color: rgba(0,154,218,.25); }
       `}</style>
     </RequireRole>
   )
 }
 
-/* ──────────────────────────────────────────────────────────────────────────
-   GUARD SSR robusto: evita 500 y decide acceso por rol (admin/super_admin)
-   ────────────────────────────────────────────────────────────────────────── */
-export const getServerSideProps: GetServerSideProps = async (ctx: GetServerSidePropsContext) => {
-  try {
-    const supabase = createServerSupabaseClient(ctx)
-    const { data: { session }, error: sErr } = await supabase.auth.getSession()
-    if (sErr) {
-      return {
-        redirect: { destination: '/login?go=' + encodeURIComponent(ctx.resolvedUrl), permanent: false },
-      }
-    }
-    if (!session) {
-      return {
-        redirect: { destination: '/login?go=' + encodeURIComponent(ctx.resolvedUrl), permanent: false },
-      }
-    }
-
-    // Perfil (rol + gate de password)
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('role, must_change_password')
-      .eq('id', session.user.id)
-      .single()
-
-    // Gate de password (si un admin está forzado a cambiar)
-    if (profile?.must_change_password === true) {
-      return {
-        redirect: { destination: '/cambiar-password?go=' + encodeURIComponent(ctx.resolvedUrl), permanent: false },
-      }
-    }
-
-    // Rol requerido: admin o super_admin
-    const role = (profile?.role ?? 'worker') as string
-    const adminLike = role === 'admin' || role === 'super_admin'
-    if (!adminLike) {
-      // trabajador intentando entrar a estadísticas → a su home
-      return {
-        redirect: { destination: '/mis-minutas', permanent: false },
-      }
-    }
-
-    // ✅ OK: renderiza normalmente
-    return { props: {} }
-  } catch (_e) {
-    // 🔐 Fallback para que NUNCA veas 500 por este guard
-    return {
-      redirect: { destination: '/minutas', permanent: false },
-    }
-  }
-}
+// ✅ SSR: solo ADMIN / SUPER_ADMIN
+export const getServerSideProps = withAuthSSR({ allowRoles: ['admin', 'super_admin'] })

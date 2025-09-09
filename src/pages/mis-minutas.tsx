@@ -1,21 +1,9 @@
-// src/pages/mis-minutas.tsx
 /**
  * MIS MINUTAS — SOLO para 'worker'
  * ============================================================================
- * Objetivos:
- * - Mantener hooks estables en el componente de página:
- *   La lógica de datos/UI vive en <WorkerScreen/> que SOLO se monta si el usuario es worker.
- * - Mostrar botón “Eliminar” SOLO a testers (correos en NEXT_PUBLIC_TEST_DELETE_EMAILS).
- *   La seguridad real la hace RLS en BD; la UI es una cortesía.
- * - Usar la API `deleteMinute()` (Paso 3) para eliminar minutas y limpiar adjuntos (best-effort).
- *
- * Roles/Política:
- * - admin/super_admin → redirect a /minutas (vista global).
- * - worker → ve su propia vista, puede crear/editar. Eliminar solo si es tester (UI) + RLS (BD).
- *
- * Notas:
- * - El conteo de adjuntos se muestra en la tarjeta; aquí NO se montan controles de evidencias.
- * - Realtime limitado a las minutas del usuario actual.
+ * - SSR con withAuthSSR() para exigir sesión (cualquier rol).
+ * - En cliente, si detecta admin/super_admin, redirige a /minutas (sin parpadeos).
+ * - Eliminar minutas solo visible para testers (UI); la seguridad real la hace RLS.
  */
 
 import React, { useEffect, useMemo, useState } from 'react'
@@ -36,11 +24,9 @@ import styles from '@/styles/Minutas.module.css'
 import { BsPlusLg } from 'react-icons/bs'
 import { useRole } from '@/hooks/useRole'
 import { deleteMinute as apiDeleteMinute } from '@/lib/minutes'
-import { withAuthAndPwdGate } from '@/lib/withAuthSSR'
-// src/pages/mis-minutas.tsx
 
-
-
+// ✅ Nuevo guard SSR
+import { withAuthSSR } from '@/lib/ssr-guard'
 
 /** Lista blanca de correos que pueden ver el botón Eliminar (tester). */
 const TEST_DELETE_EMAILS: string[] = (process.env.NEXT_PUBLIC_TEST_DELETE_EMAILS || '')
@@ -140,7 +126,9 @@ export default function MisMinutasPage() {
     </SessionGate>
   )
 }
-export const getServerSideProps = withAuthAndPwdGate()
+
+// ✅ SSR: exige sesión; el gating fino de rol se hace en cliente
+export const getServerSideProps = withAuthSSR()
 
 /* ============================= CONTENIDO worker ============================= */
 
@@ -227,13 +215,12 @@ function WorkerScreen({
     setShowDelete(true)
   }
 
-  // Ejecutar eliminación usando la API del Paso 3
+  // Ejecutar eliminación usando la API
   const confirmDelete = async () => {
     if (!toDeleteId) return
     try {
       setDeleting(true)
-      // 🔐 RLS decidirá si el usuario realmente puede borrar
-      await apiDeleteMinute(toDeleteId)
+      await apiDeleteMinute(toDeleteId) // 🔐 RLS decide si puede borrar
       setShowDelete(false)
       setToDeleteId(null)
       setFeedback('Minuta eliminada correctamente.')
@@ -248,7 +235,7 @@ function WorkerScreen({
     }
   }
 
-  // Logout robusto (evita refresco manual)
+  // Logout robusto
   const logout = async () => {
     try { await supabase.auth.signOut() } finally { window.location.assign('/login') }
   }
@@ -327,7 +314,7 @@ function WorkerScreen({
         <BsPlusLg />
       </Button>
 
-      {/* Modal de eliminación (solo aparece si el tester lo dispara) */}
+      {/* Modal de eliminación */}
       <DeleteModal
         show={showDelete}
         onHide={() => setShowDelete(false)}
@@ -354,7 +341,5 @@ function DeleteModal({
         </Button>
       </Modal.Footer>
     </Modal>
-    
   )
-  
 }
