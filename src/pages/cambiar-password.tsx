@@ -14,16 +14,42 @@ import styles from '@/styles/ChangePassword.module.css'
  * - 🔒 Apaga SIEMPRE ambos flags en profiles:
  *     must_change_password=false y first_login=false  (previene doble gate).
  * - Fallbacks si RLS bloquea: RPC clear_must_change_password / ack_first_login.
- * - Invalida SWR, refresh de sesión, signOut y redirección a login con next.
+ * - Invalida SWR, refresh de sesión y redirección por ROL:
+ *     worker  -> /mis-minutas
+ *     admin/* -> /minutas
+ *   (Si hay ?go, se respeta sólo si es compatible con el rol.)
  * - Cortacircuito local: sessionStorage.pwdChanged="1" para saltar gates 1 vez.
- * - Sin cambios a triggers/policies/metadata.
  */
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Helpers locales (no necesitas archivos extra)                             */
+/* ────────────────────────────────────────────────────────────────────────── */
+type UserRole = 'worker' | 'admin' | 'super_admin'
+const normalizeRole = (r?: string | null): UserRole => (r === 'admin' || r === 'super_admin') ? (r as UserRole) : 'worker'
+const homeForRole = (role?: string | null) => normalizeRole(role) === 'worker' ? '/mis-minutas' : '/minutas'
+const resolvePostAuthDestination = (role?: string | null, go?: string | null) => {
+  const safe = homeForRole(role)
+  if (!go) return safe
+  try {
+    const u = new URL(go, 'https://dummy.local') // parse seguro
+    const path = u.pathname + (u.search ?? '')
+    const isWorker = normalizeRole(role) === 'worker'
+    const okWorker = path === '/' || path === '/mis-minutas' || path.startsWith('/cambiar-password')
+    const okAdmin  = path === '/' || path.startsWith('/minutas') || path.startsWith('/cambiar-password')
+    return (isWorker ? okWorker : okAdmin) ? path : safe
+  } catch {
+    return safe
+  }
+}
+
 export default function CambiarPasswordPage() {
   const router = useRouter()
-  const go =
+
+  // CHANGE: no fijamos fallback a /mis-minutas aquí; lo decidirá resolvePostAuthDestination por rol
+  const goParam =
     typeof router.query.go === 'string' && router.query.go.trim().length > 0
       ? router.query.go
-      : '/mis-minutas' // 👈 fallback actualizado (antes: '/minutas/estadisticas')
+      : null
 
   const [checking, setChecking] = useState(true)
   const [password, setPassword] = useState('')
@@ -78,7 +104,6 @@ export default function CambiarPasswordPage() {
       if (updErr) throw updErr
 
       // 2) Apagar flags en profiles en UNA sola operación (preferido)
-      //    - Evita doble redirect (must_change_password / first_login)
       const trySingleUpdate = async () => {
         const { error } = await supabase
           .from('profiles')
@@ -91,41 +116,44 @@ export default function CambiarPasswordPage() {
         if (error) throw error
       }
 
-      // 2b) Fallbacks por si RLS bloquea: RPCs (opcionales si existen)
+      // 2b) Fallbacks por si RLS bloquea: RPCs
       const tryRpcClearMust = async () => {
-        const { error } = await supabase.rpc('clear_must_change_password') // RETURNS boolean/void
+        const { error } = await supabase.rpc('clear_must_change_password')
         if (error) throw error
       }
       const tryRpcAckFirst = async () => {
-        // si tienes este RPC; si no existe, se ignora
-        const { error } = await supabase.rpc('ack_first_login') // RETURNS boolean/void
+        const { error } = await supabase.rpc('ack_first_login')
         if (error) throw error
       }
 
       try {
         await trySingleUpdate()
       } catch {
-        // Intentar apagar cada flag por RPC si el UPDATE directo falló
         try { await tryRpcClearMust() } catch { /* ignore */ }
         try { await tryRpcAckFirst() } catch { /* ignore */ }
       }
 
       // 3) Invalida cachés SWR y refresca sesión
-      await mutate(['profile:me', uid]) // trae profile sin flags
+      await mutate(['profile:me', uid])
       await mutate('auth:uid')
       await supabase.auth.refreshSession()
 
-      // 👇 Cortacircuito de gates en el siguiente render del cliente
+      // Cortacircuito de gates en el siguiente render del cliente
       try { sessionStorage.setItem('pwdChanged', '1') } catch { /* ignore */ }
 
       setOk(true)
 
-      // 4) Cerrar sesión para evitar ecos del JWT previo
-      await supabase.auth.signOut()
+      // 4) Obtener rol actual del perfil y redirigir por ROL (✅ PASO 3 aplicado)
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', uid)
+        .single()
 
-      // 5) Redirigir limpio a login con feedback y return
-      const next = encodeURIComponent(go)
-      router.replace(`/login?changed=1&next=${next}`)
+      const next = resolvePostAuthDestination(profile?.role ?? 'worker', goParam)
+      await router.replace(next)
+
+      // Nota: ya NO hacemos signOut aquí. Mantener sesión evita rebote innecesario a /login.
     } catch (e: any) {
       setErr(e?.message || 'No se pudo actualizar la contraseña.')
     } finally {
