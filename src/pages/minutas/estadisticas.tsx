@@ -1,9 +1,19 @@
 // src/pages/minutas/estadisticas.tsx
 /**
  * Estadísticas mensuales (ADMIN) + Exportación CSV/XLSX con gráficos (imágenes).
- * 🔒 Protegida por rol: admin | super_admin (SSR + RequireRole en cliente)
+ * 🔒 Protegida por rol: admin | super_admin (RequireRole)
  * - Se elimina cualquier guard por email; usamos gating por rol y RLS.
  * - Excluye del conteo a usuarios de PRUEBAS (config por ENV).
+ *
+ * ENV relevantes:
+ * - NEXT_PUBLIC_LOGIN_DOMAIN: dominio de login local (por defecto 'login.local').
+ * - NEXT_PUBLIC_STATS_EXCLUDE_EMAILS: lista coma-separada de emails a EXCLUIR de estadísticas
+ *     EJ: "pruebas@login.local,qa1@login.local"
+ * - NEXT_PUBLIC_STATS_EXTRA_EMAILS: correos extra a incluir en tablero (además de los oficiales).
+ *
+ * Defensa en profundidad:
+ * - Filtro en BD: .in('created_by_email', ALLOWED_EMAILS) + .neq(...) por cada EXCLUIDO
+ * - Filtro en cliente: sanity-check para asegurar que excluidos no cuenten aunque cambie ALLOWED_EMAILS.
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -15,9 +25,9 @@ import {
 } from 'react-bootstrap'
 import { FiArrowLeft, FiInfo } from 'react-icons/fi'
 import { supabase } from '@/lib/supabaseClient'
-import RequireRole from '@/components/RequireRole' // 🔒 Gating en cliente
+import RequireRole from '@/components/RequireRole' // 🔒 GATING por rol
 
-// ⬇️ Guard SSR robusto (evita 500) — NUEVO
+// ⬇️ NUEVO: imports para el guard SSR robusto
 import type { GetServerSideProps, GetServerSidePropsContext } from 'next'
 import { createServerSupabaseClient } from '@supabase/auth-helpers-nextjs'
 
@@ -346,7 +356,7 @@ export default function AdminEstadisticasPage() {
     for (const r of rows) {
       const email = (r.created_by_email ?? '').toLowerCase()
       if (!email || !(email in base)) continue // Ignora todo lo que no está en USERS (incluye testers)
-      if (STATS_EXCLUDE_EMAILS.includes(email)) continue // defensa extra
+      if (STATS_EXCLUDE_EMAILS.includes(email)) continue // defensa extra (no debería entrar por filtros)
 
       const date = r.date ?? ''
       if (!date) continue
@@ -363,7 +373,7 @@ export default function AdminEstadisticasPage() {
     }
 
     for (const u of USERS) {
-      const dayMap: DayMinutesMap = perUserPerDay.get(u.email) ?? new Map()
+      const dayMap: DayMinutesMap = perUserPerDay.get(u.email) ?? new Map<string, number>()
 
       const days: [string, number][] = Array.from(dayMap.entries())
         .sort((a, b) => a[0].localeCompare(b[0]))
@@ -437,7 +447,7 @@ export default function AdminEstadisticasPage() {
     downloadCsvFile(`detalle_${detail.name.replace(/\s+/g, '')}_${ym}.csv`, headers, rowsCsv)
   }
 
-  // Exportar detalle diario (XLSX) con ambos gráficos como imágenes
+  // Exportar detalle diario (XLSX) con ambos gráficos como imágenes (robusto)
   const onExportDetailXlsx = async () => {
     if (!detail) return
 
@@ -525,13 +535,14 @@ export default function AdminEstadisticasPage() {
   /* ============================================================ */
 
   return (
-    <RequireRole allow={['admin','super_admin']}> {/* 🔒 Gating por rol (cliente) */}
+    <RequireRole allow={['admin','super_admin']}> {/* 🔒 Gating por rol */}
       <Head><title>Estadísticas mensuales — Admin</title></Head>
 
       <Container className="py-4">
         {/* Volver + Título + Selector Mes con Nudge */}
         <Row className="align-items-center mb-3">
           <Col className="d-flex align-items-center gap-3">
+            {/* Botón Volver estilizado */}
             <button
               type="button"
               className="backBtn"
@@ -548,59 +559,367 @@ export default function AdminEstadisticasPage() {
           </Col>
 
           <Col xs="12" md="auto" className="d-flex align-items-end gap-3 mt-3 mt-md-0">
-            {/* nudge */}
-            {/* ... el resto del JSX queda igual ... */}
+            {showNudge && (
+              <div className="stats-nudge" aria-live="polite">
+                <span className="pulse" aria-hidden />
+                <span className="tip">
+                  <FiInfo style={{ marginRight: 6 }} aria-hidden />
+                  Tip: filtra por <strong>mes</strong>
+                </span>
+                <span className="arrow" aria-hidden>➡</span>
+              </div>
+            )}
+
+            <Form.Group controlId="monthSelect" className="m-0">
+              <Form.Label className="mb-1">Mes</Form.Label>
+              <Form.Control
+                type="month"
+                value={ym}
+                onChange={(e) => { setYm(e.target.value); setShowNudge(false) }}
+              />
+            </Form.Group>
           </Col>
         </Row>
 
-        {/* ... Resto del contenido sin cambios ... */}
-        {/* Mantengo todo TU JSX existente aquí tal cual lo enviaste */}
-        {/* (gráficos, tablas, modal, estilos en <style jsx> etc.) */}
+        {/* Botón Export CSV del resumen */}
+        <div className="d-flex justify-content-end mb-2">
+          <Button size="sm" variant="outline-success" onClick={onExportMonthlyCsv}>
+            Exportar resumen (CSV)
+          </Button>
+        </div>
 
+        {error && <Alert variant="danger" className="mb-3">{error}</Alert>}
+
+        <Card className="p-3 mb-4">
+          {loading ? (
+            <div className="d-flex align-items-center gap-2">
+              <Spinner size="sm" animation="border" /> Cargando…
+            </div>
+          ) : (
+            <div style={{ width: '100%', height: 360 }}>
+              <ResponsiveContainer>
+                <ComposedChart data={overviewChart} margin={{ top: 10, right: 20, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis unit="h" />
+                  <Tooltip />
+                  <Legend />
+                  <Bar
+                    dataKey="effectiveH"
+                    name="Efectivo (h)"
+                    fill={PALETTE.effective}
+                    radius={[6,6,0,0]}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="expectedH"
+                    name="Meta (h)"
+                    stroke={PALETTE.expected}
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </Card>
+
+        <Card className="p-3">
+          <div className="table-responsive">
+            <Table hover className="align-middle">
+              <thead>
+                <tr>
+                  <th>Usuario</th>
+                  <th className="text-center">Días c/reg.</th>
+                  <th className="text-end" title="Tiempo total entre inicio y fin por día, sin descuentos.">Bruto</th>
+                  <th className="text-end">Descansos</th>
+                  <th className="text-end">Tiempo muerto (promedio)</th>
+                  <th className="text-end">Efectivo</th>
+                  <th className="text-end">Meta mes</th>
+                  <th className="text-end">Cumpl.</th>
+                  <th className="text-end"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {dataByUser.map(u => {
+                  const compliance = pct(u.effectiveMin)
+                  return (
+                    <tr key={u.email}>
+                      <td>
+                        <div className="fw-semibold">{u.name}</div>
+                        <div className="text-muted small">{u.email}</div>
+                      </td>
+                      <td className="text-center">{u.daysWithLogs}</td>
+                      <td className="text-end">{minToHhmm(u.grossMin)}</td>
+                      <td className="text-end">{minToHhmm(u.restMin)}</td>
+                      <td className="text-end">{minToHhmm(u.idleMin)}</td>
+                      <td className="text-end fw-semibold">{minToHhmm(u.effectiveMin)}</td>
+                      <td className="text-end">{minToHhmm(expectedMonthEffectiveMin)}</td>
+                      <td className="text-end">
+                        <Badge bg={compliance >= 100 ? 'success' : compliance >= 80 ? 'warning' : 'secondary'}>
+                          {compliance}%
+                        </Badge>
+                      </td>
+                      <td className="text-end">
+                        <Button size="sm" variant="outline-primary" onClick={() => { setDetail(u); setShow(true) }}>
+                          Ver detalle
+                        </Button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </Table>
+          </div>
+        </Card>
       </Container>
 
+      {/* Modal Detalle Usuario */}
+      <Modal show={!!detail && show} onHide={() => setShow(false)} size="xl">
+        <Modal.Header closeButton>
+          <Modal.Title>Detalle — {detail?.name} ({ym})</Modal.Title>
+        </Modal.Header>
+        <Modal.Body>
+          {!detail ? null : (
+            <>
+              <Row className="g-3">
+                <Col lg={8}>
+                  <Card className="p-3 h-100">
+                    <h6 className="mb-2">Composición diaria (horas)</h6>
+                    <div ref={chartDailyRef} style={{ width: '100%', height: 260, background: '#fff' }}>
+                      <ResponsiveContainer>
+                        <ComposedChart
+                          data={detailDailyChart}
+                          margin={{ top: 10, right: 20, left: 0, bottom: 0 }}
+                        >
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="date" />
+                          <YAxis unit="h" />
+                          <Tooltip content={<ChartTooltip />} />
+                          <Legend />
+                          <Bar dataKey="restH"      name="Descansos"                stackId="a" fill={PALETTE.rest} />
+                          <Bar dataKey="idleH"      name="Tiempo muerto (promedio)" stackId="a" fill={PALETTE.idle} />
+                          <Bar dataKey="effectiveH" name="Efectivo"                 stackId="a" fill={PALETTE.effective} />
+                          <Line
+                            type="monotone"
+                            dataKey="effectiveH"
+                            name="Efectivo (línea)"
+                            stroke={PALETTE.effective}
+                            strokeWidth={2}
+                            dot={false}
+                          />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <MetricHelp />
+                  </Card>
+                </Col>
+                <Col lg={4}>
+                  <Card className="p-3 h-100 d-flex flex-column justify-content-center">
+                    <h6 className="mb-2">Cumplimiento mensual</h6>
+                    <div ref={donutRef} style={{ width: '100%', height: 240, background: '#fff' }}>
+                      <ResponsiveContainer>
+                        <PieChart>
+                          <Pie
+                            data={[
+                              { name: 'Efectivo',           value: +(Math.min(detail.effectiveMin, Math.max(1, expectedMonthEffectiveMin) ) / 60).toFixed(2) },
+                              { name: 'Restante para meta', value: +(Math.max(0, expectedMonthEffectiveMin - detail.effectiveMin) / 60).toFixed(2) },
+                            ]}
+                            dataKey="value"
+                            nameKey="name"
+                            innerRadius={60}
+                            outerRadius={90}
+                            paddingAngle={2}
+                          >
+                            {[PALETTE.effective, PALETTE.donutBg].map((c, i) => (
+                              <Cell key={i} fill={c} />
+                            ))}
+                          </Pie>
+                          <Tooltip />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="text-center mt-2">
+                      <div className="display-6 fw-bold">
+                        {expectedMonthEffectiveMin > 0
+                          ? Math.round((detail.effectiveMin / expectedMonthEffectiveMin) * 100)
+                          : 0}%</div>
+                      <div className="text-muted small">
+                        Efectivo: {minToHhmm(detail.effectiveMin)} / Meta: {minToHhmm(expectedMonthEffectiveMin)}
+                      </div>
+                    </div>
+                  </Card>
+                </Col>
+              </Row>
+
+              <Card className="p-3 mt-3">
+                <div className="d-flex flex-wrap gap-2 justify-content-between align-items-center">
+                  <h6 className="mb-2">Tabla diaria</h6>
+                  <div className="d-flex gap-2">
+                    <Button size="sm" variant="outline-success" onClick={onExportDetailCsv}>
+                      Exportar detalle (CSV)
+                    </Button>
+                    <Button size="sm" variant="success" onClick={onExportDetailXlsx}>
+                      Exportar detalle (XLSX con gráficos)
+                    </Button>
+                  </div>
+                </div>
+                <div className="table-responsive">
+                  <Table size="sm" hover>
+                    <thead>
+                      <tr>
+                        <th>Fecha</th>
+                        <th className="text-end" title="Tiempo total entre inicio y fin por día, sin descuentos.">
+                          Bruto
+                        </th>
+                        <th className="text-end">Descansos</th>
+                        <th className="text-end">Tiempo muerto (promedio)</th>
+                        <th className="text-end">Efectivo</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.byDay.map(d => (
+                        <tr key={d.date}>
+                          <td>{d.date}</td>
+                          <td className="text-end">{minToHhmm(d.grossMin)}</td>
+                          <td className="text-end">{minToHhmm(d.restMin)}</td>
+                          <td className="text-end">{minToHhmm(d.idleMin)}</td>
+                          <td className="text-end fw-semibold">{minToHhmm(d.effectiveMin)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </Table>
+                </div>
+              </Card>
+            </>
+          )}
+        </Modal.Body>
+        <Modal.Footer>
+          <Button variant="secondary" onClick={() => setShow(false)}>Cerrar</Button>
+        </Modal.Footer>
+      </Modal>
+
       {/* Estilos del nudge y del botón Volver */}
-      {/* ... tus estilos existentes ... */}
+      <style jsx>{`
+        /* --- NUDGE (filtro por mes) --- */
+        .stats-nudge {
+          display: inline-flex;
+          align-items: center;
+          gap: .5rem;
+          user-select: none;
+          pointer-events: none;
+        }
+        .pulse {
+          width: 10px;
+          height: 10px;
+          border-radius: 9999px;
+          background: #009ada;
+          box-shadow: 0 0 0 0 rgba(0, 154, 218, 0.6);
+          animation: pulseAnim 1.8s ease-out infinite;
+        }
+        @keyframes pulseAnim {
+          0%   { box-shadow: 0 0 0 0 rgba(0,154,218,.6); }
+          70%  { box-shadow: 0 0 0 12px rgba(0,154,218,0); }
+          100% { box-shadow: 0 0 0 0 rgba(0,154,218,0); }
+        }
+        .tip {
+          background: #e6f7ff;
+          color: #035d82;
+          border: 1px solid rgba(0, 154, 218, .25);
+          font-weight: 600;
+          padding: 3px 10px;
+          border-radius: 999px;
+          font-size: .85rem;
+          white-space: nowrap;
+        }
+        .arrow {
+          font-size: 1.25rem;
+          line-height: 1;
+          transform: translateY(-1px);
+        }
+        @media (max-width: 768px) {
+          .arrow { display: none; }
+          .tip { font-size: .8rem; }
+        }
+
+        /* --- Botón Volver (branding #009ada) --- */
+        .backBtn {
+          display: inline-flex;
+          align-items: center;
+          gap: .5rem;
+          padding: .35rem .6rem;
+          border-radius: 9999px;
+          background: transparent;
+          color: #009ada;
+          border: 1px solid transparent;
+          font-weight: 600;
+          line-height: 1;
+          cursor: pointer;
+          text-decoration: none;
+        }
+        .backBtn :global(svg) {
+          transform: translateY(-1px);
+        }
+        .backBtn:hover {
+          background: #e6f7ff;
+          border-color: rgba(0,154,218,.25);
+          text-decoration: none;
+        }
+        .backBtn:focus {
+          outline: none;
+          box-shadow: 0 0 0 .2rem rgba(0,154,218,.35);
+        }
+      `}</style>
     </RequireRole>
   )
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
-   GUARD SSR: evita 500 y controla acceso por rol + gate de contraseña
+   GUARD SSR robusto: evita 500 y decide acceso por rol (admin/super_admin)
    ────────────────────────────────────────────────────────────────────────── */
 export const getServerSideProps: GetServerSideProps = async (ctx: GetServerSidePropsContext) => {
   try {
     const supabase = createServerSupabaseClient(ctx)
     const { data: { session }, error: sErr } = await supabase.auth.getSession()
-    if (sErr || !session) {
+    if (sErr) {
+      return {
+        redirect: { destination: '/login?go=' + encodeURIComponent(ctx.resolvedUrl), permanent: false },
+      }
+    }
+    if (!session) {
       return {
         redirect: { destination: '/login?go=' + encodeURIComponent(ctx.resolvedUrl), permanent: false },
       }
     }
 
+    // Perfil (rol + gate de password)
     const { data: profile } = await supabase
       .from('profiles')
       .select('role, must_change_password')
       .eq('id', session.user.id)
       .single()
 
+    // Gate de password (si un admin está forzado a cambiar)
     if (profile?.must_change_password === true) {
       return {
         redirect: { destination: '/cambiar-password?go=' + encodeURIComponent(ctx.resolvedUrl), permanent: false },
       }
     }
 
+    // Rol requerido: admin o super_admin
     const role = (profile?.role ?? 'worker') as string
     const adminLike = role === 'admin' || role === 'super_admin'
     if (!adminLike) {
+      // trabajador intentando entrar a estadísticas → a su home
       return {
         redirect: { destination: '/mis-minutas', permanent: false },
       }
     }
 
+    // ✅ OK: renderiza normalmente
     return { props: {} }
-  } catch {
-    // Nunca 500 por el guard
+  } catch (_e) {
+    // 🔐 Fallback para que NUNCA veas 500 por este guard
     return {
       redirect: { destination: '/minutas', permanent: false },
     }
