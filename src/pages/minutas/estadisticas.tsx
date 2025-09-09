@@ -1,19 +1,13 @@
 // src/pages/minutas/estadisticas.tsx
 /**
  * Estadísticas mensuales (ADMIN) + Exportación CSV/XLSX con gráficos (imágenes).
+ * Ajuste de "Tiempo muerto" (30m) usando pausas reales registradas por el botón Pause.
+ * Idle aplicado por día = max(0, 30 - min(pause_min, 30)).
+ *
  * 🔒 Protegida por rol: admin | super_admin (RequireRole)
- * - Se elimina cualquier guard por email; usamos gating por rol y RLS.
- * - Excluye del conteo a usuarios de PRUEBAS (config por ENV).
- *
- * ENV relevantes:
- * - NEXT_PUBLIC_LOGIN_DOMAIN: dominio de login local (por defecto 'login.local').
- * - NEXT_PUBLIC_STATS_EXCLUDE_EMAILS: lista coma-separada de emails a EXCLUIR de estadísticas
- *     EJ: "pruebas@login.local,qa1@login.local"
- * - NEXT_PUBLIC_STATS_EXTRA_EMAILS: correos extra a incluir en tablero (además de los oficiales).
- *
- * Defensa en profundidad:
- * - Filtro en BD: .in('created_by_email', ALLOWED_EMAILS) + .neq(...) por cada EXCLUIDO
- * - Filtro en cliente: sanity-check para asegurar que excluidos no cuenten aunque cambie ALLOWED_EMAILS.
+ * - Filtro por lista blanca + exclusiones por ENV.
+ * - Llama a RPC minute_daily_summary(start, end, emails[]) para obtener:
+ *     email, date, gross_min, pause_min, work_min
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -53,17 +47,11 @@ const YAxis = dynamic(
   { ssr: false }
 )
 const Tooltip = dynamic(
-  () =>
-    import('recharts').then(m => ({
-      default: (props: any) => <m.Tooltip {...props} />,
-    })),
+  () => import('recharts').then(m => ({ default: (props: any) => <m.Tooltip {...props} /> })),
   { ssr: false }
 )
 const Legend = dynamic(
-  () =>
-    import('recharts').then(m => ({
-      default: (props: any) => <m.Legend {...props} />,
-    })),
+  () => import('recharts').then(m => ({ default: (props: any) => <m.Legend {...props} /> })),
   { ssr: false }
 )
 const CartesianGrid = dynamic(
@@ -102,8 +90,6 @@ const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
 
 /* ============================================================================
  * Lista de usuarios "oficiales" a mostrar en el tablero
- *  ⚠️ NO incluimos al usuario de PRUEBAS aquí (se excluye abajo por ENV).
- *  Puedes mantener esta lista estática y sumar adicionales por ENV si hace falta.
  * ==========================================================================*/
 const USERS = [
   { username: 'kat.acosta',   name: 'Katherine.A' },
@@ -139,7 +125,7 @@ const ALLOWED_EMAILS = Array.from(
 ).filter(e => !STATS_EXCLUDE_EMAILS.includes(e))
 
 const LUNCH_MIN = 60
-const BREAK_MIN = 20
+const  BREAK_MIN = 20
 const REST_PER_DAY_MIN = LUNCH_MIN + BREAK_MIN
 
 const NORMAL_IDLE_MIN = 30 // Tiempo muerto promedio/día
@@ -167,20 +153,6 @@ function countBusinessDays(start: Date, end: Date, workDays = WORKWEEK_DAYS) {
   return count
 }
 
-function parseTimeToMin(t?: string | null): number | null {
-  if (!t) return null
-  const [h, m, s] = t.split(':').map(Number)
-  const mm = (h || 0) * 60 + (m || 0) + Math.floor((s || 0) / 60)
-  return Number.isFinite(mm) ? mm : null
-}
-
-function diffMin(start?: string | null, end?: string | null): number {
-  const a = parseTimeToMin(start)
-  const b = parseTimeToMin(end)
-  if (a == null || b == null || b <= a) return 0
-  return b - a
-}
-
 function minToHhmm(min: number) {
   const sign = min < 0 ? '-' : ''
   const M = Math.abs(min)
@@ -190,13 +162,12 @@ function minToHhmm(min: number) {
 }
 
 // ---------------- Tipos ----------------
-type MinuteRow = {
-  user_id: string | null
-  created_by_email: string | null
-  created_by_name: string | null
-  date: string | null
-  start_time: string | null
-  end_time: string | null
+type RpcRow = {
+  email: string
+  date: string
+  gross_min: number   // minutos brutos (inicio-fin)
+  pause_min: number   // minutos en pausa (botón Pause)
+  work_min: number    // minutos trabajados (suma de intervals)
 }
 
 type UserAgg = {
@@ -216,23 +187,6 @@ type UserAgg = {
     idleMin: number
     effectiveMin: number
   }>
-}
-
-// Tipos auxiliares para mapas
-type DayMinutesMap = Map<string, number>;
-type PerUserPerDay = Map<string, DayMinutesMap>;
-
-// --- Ayuda de interpretación ---
-function MetricHelp() {
-  return (
-    <ul style={{ display: 'grid', gap: 8, marginTop: 8, fontSize: 12, opacity: 0.9 }}>
-      <li><strong>Bruto:</strong> Tiempo total entre inicio y fin por día, sin descuentos.</li>
-      <li><strong>Descansos:</strong> Bloque fijo diario: 1h 20m (almuerzo + pausas).</li>
-      <li><strong>Tiempo muerto (promedio):</strong> Tolerancia diaria promedio (30m) para transiciones/interrupciones.</li>
-      <li><strong>Efectivo:</strong> Bruto – Descansos – Tiempo muerto (nunca negativo).</li>
-      <li><strong>Meta:</strong> Objetivo mensual derivado de 44h/semana.</li>
-    </ul>
-  )
 }
 
 /* ===================== CSV UTILS ===================== */
@@ -259,6 +213,26 @@ function downloadCsvFile(filename: string, headers: string[], rows: (string | nu
   document.body.removeChild(a)
   setTimeout(() => URL.revokeObjectURL(url), 500)
 }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Ayuda visual bajo el gráfico diario (faltaba y causaba el error TS)
+   ────────────────────────────────────────────────────────────────────────── */
+function MetricHelp() {
+  return (
+    <ul style={{ display: 'grid', gap: 8, marginTop: 8, fontSize: 12, opacity: 0.9 }}>
+      <li><strong>Bruto:</strong> Tiempo total entre inicio y fin por día, sin descuentos.</li>
+      <li><strong>Descansos:</strong> Bloque fijo diario: 1h 20m (almuerzo + pausas).</li>
+      <li>
+        <strong>Tiempo muerto (ajustado):</strong> {NORMAL_IDLE_MIN}m/día menos la pausa real
+        (botón Pause), limitado entre 0 y {NORMAL_IDLE_MIN}:
+        <code> idle = max(0, {NORMAL_IDLE_MIN} - min(pause, {NORMAL_IDLE_MIN}))</code>.
+      </li>
+      <li><strong>Efectivo:</strong> Bruto – Descansos – Tiempo muerto (nunca negativo).</li>
+      <li><strong>Meta:</strong> Objetivo mensual derivado de 44h/semana.</li>
+    </ul>
+  )
+}
+
 /* ===================================================== */
 
 export default function AdminEstadisticasPage() {
@@ -284,7 +258,7 @@ export default function AdminEstadisticasPage() {
   }, [])
 
   const [loading, setLoading] = useState(false)
-  const [rows, setRows] = useState<MinuteRow[]>([])
+  const [rpcDaily, setRpcDaily] = useState<RpcRow[]>([]) // ⬅️ datos del RPC
   const [error, setError] = useState<string | null>(null)
   const [show, setShow] = useState(false)
   const [detail, setDetail] = useState<UserAgg | null>(null)
@@ -293,42 +267,30 @@ export default function AdminEstadisticasPage() {
   const chartDailyRef = useRef<HTMLDivElement | null>(null)
   const donutRef = useRef<HTMLDivElement | null>(null)
 
-  // Fetch mensual SOLO de la lista blanca y excluyendo testers
+  /* ========================= Fetch mensual (RPC) ========================= */
   useEffect(() => {
     setLoading(true)
     setError(null)
     ;(async () => {
       try {
-        // ⚠️ Si por algún motivo la lista queda vacía, no hagas query abierta
         if (ALLOWED_EMAILS.length === 0) {
-          setRows([])
+          setRpcDaily([])
           return
         }
 
-        let q = supabase
-          .from('minute')
-          .select('user_id, created_by_email, created_by_name, date, start_time, end_time')
-          .gte('date', startISO)
-          .lte('date', endISO)
-          .in('created_by_email', ALLOWED_EMAILS)
-          .order('date', { ascending: true })
-          .order('start_time', { ascending: true })
-
-        // Exclusión explícita (por si EXTRA_ALLOWED trae un tester por error)
-        for (const ex of STATS_EXCLUDE_EMAILS) {
-          q = q.neq('created_by_email', ex)
-        }
-
-        const { data, error } = await q
+        const { data, error } = await supabase.rpc('minute_daily_summary', {
+          p_start: startISO,
+          p_end: endISO,
+          p_emails: ALLOWED_EMAILS,
+        })
         if (error) throw error
 
-        // Filtro defensivo en cliente (case-insensitive)
-        const rowsSafe = (data ?? []).filter(r => {
-          const mail = (r?.created_by_email || '').toLowerCase()
+        const safe: RpcRow[] = (data ?? []).filter((r: RpcRow) => {
+          const mail = (r?.email || '').toLowerCase()
           return ALLOWED_EMAILS.includes(mail) && !STATS_EXCLUDE_EMAILS.includes(mail)
         })
 
-        setRows(rowsSafe as MinuteRow[])
+        setRpcDaily(safe)
       } catch (e: any) {
         setError(e?.message ?? 'No se pudieron cargar las minutas.')
       } finally {
@@ -337,7 +299,7 @@ export default function AdminEstadisticasPage() {
     })()
   }, [startISO, endISO])
 
-  // Agregación por usuario (solo los oficiales en USERS)
+  /* ===================== Agregación por usuario ===================== */
   const dataByUser: UserAgg[] = useMemo(() => {
     const base: Record<string, UserAgg> = {}
     for (const u of USERS) {
@@ -348,42 +310,37 @@ export default function AdminEstadisticasPage() {
       }
     }
 
-    // email -> (date -> grossMin)
-    const perUserPerDay: PerUserPerDay = new Map()
-
-    for (const r of rows) {
-      const email = (r.created_by_email ?? '').toLowerCase()
-      if (!email || !(email in base)) continue // Ignora todo lo que no está en USERS (incluye testers)
-      if (STATS_EXCLUDE_EMAILS.includes(email)) continue // defensa extra (no debería entrar por filtros)
-
-      const date = r.date ?? ''
-      if (!date) continue
-
-      const dur = diffMin(r.start_time, r.end_time)
-      if (dur <= 0) continue
-
-      let mapDay = perUserPerDay.get(email)
-      if (!mapDay) {
-        mapDay = new Map<string, number>()
-        perUserPerDay.set(email, mapDay)
-      }
-      mapDay.set(date, (mapDay.get(date) ?? 0) + dur)
+    // email -> (date -> RpcRow)
+    const byUserDay = new Map<string, Map<string, RpcRow>>()
+    for (const r of rpcDaily) {
+      if (!base[r.email]) continue
+      let m = byUserDay.get(r.email)
+      if (!m) { m = new Map(); byUserDay.set(r.email, m) }
+      m.set(r.date, r)
     }
 
     for (const u of USERS) {
-      const dayMap: DayMinutesMap = perUserPerDay.get(u.email) ?? new Map<string, number>()
-
-      const days: [string, number][] = Array.from(dayMap.entries())
-        .sort((a, b) => a[0].localeCompare(b[0]))
+      const dayMap = byUserDay.get(u.email) ?? new Map<string, RpcRow>()
+      const days = Array.from(dayMap.keys()).sort()
 
       let gross = 0, rest = 0, net = 0, idle = 0, eff = 0
       const byDay: UserAgg['byDay'] = []
 
-      for (const [d, g] of days) {
-        const restD = g > 0 ? REST_PER_DAY_MIN : 0
+      for (const d of days) {
+        const r = dayMap.get(d)!
+        const g  = Math.max(0, r.gross_min)            // minutos brutos (inicio-fin)
+        const pz = Math.max(0, r.pause_min)            // minutos pausados (botón Pause)
+
+        const restD = g > 0 ? REST_PER_DAY_MIN : 0     // 60 + 20
         const netD  = Math.max(0, g - restD)
-        const idleD = netD > 0 ? Math.min(netD, NORMAL_IDLE_MIN) : 0
-        const effD  = Math.max(0, netD - idleD)
+
+        // Idle ajustado por pausas reales:
+        //   idleAdj = max(0, 30 - min(pause, 30))
+        //   y nunca mayor al neto
+        const idleAdj = Math.max(0, NORMAL_IDLE_MIN - Math.min(pz, NORMAL_IDLE_MIN))
+        const idleD   = Math.min(netD, idleAdj)
+
+        const effD    = Math.max(0, netD - idleD)
 
         gross += g; rest += restD; net += netD; idle += idleD; eff += effD
         byDay.push({ date: d, grossMin: g, restMin: restD, netMin: netD, idleMin: idleD, effectiveMin: effD })
@@ -399,7 +356,7 @@ export default function AdminEstadisticasPage() {
     }
 
     return Object.values(base).sort((a,b) => a.name.localeCompare(b.name))
-  }, [rows])
+  }, [rpcDaily])
 
   const overviewChart = useMemo(() => {
     return dataByUser.map(u => ({
@@ -469,8 +426,7 @@ export default function AdminEstadisticasPage() {
           skipFonts: true,
           filter: (n: any) => n.tagName !== 'IFRAME' && n.tagName !== 'LINK' && n.tagName !== 'SCRIPT',
         })
-      } catch (e) {
-        console.error('toPng failed', e)
+      } catch {
         return ''
       }
     }
@@ -530,17 +486,15 @@ export default function AdminEstadisticasPage() {
     document.body.removeChild(a)
     setTimeout(() => URL.revokeObjectURL(url), 500)
   }
-  /* ============================================================ */
 
   return (
-    <RequireRole allow={['admin','super_admin']}> {/* 🔒 Gating por rol */}
+    <RequireRole allow={['admin','super_admin']}>
       <Head><title>Estadísticas mensuales — Admin</title></Head>
 
       <Container className="py-4">
         {/* Volver + Título + Selector Mes con Nudge */}
         <Row className="align-items-center mb-3">
           <Col className="d-flex align-items-center gap-3">
-            {/* Botón Volver estilizado */}
             <button
               type="button"
               className="backBtn"
@@ -579,7 +533,7 @@ export default function AdminEstadisticasPage() {
           </Col>
         </Row>
 
-        {/* Botón Export CSV del resumen */}
+        {/* Export CSV del resumen */}
         <div className="d-flex justify-content-end mb-2">
           <Button size="sm" variant="outline-success" onClick={onExportMonthlyCsv}>
             Exportar resumen (CSV)
@@ -799,7 +753,6 @@ export default function AdminEstadisticasPage() {
 
       {/* Estilos del nudge y del botón Volver */}
       <style jsx>{`
-        /* --- NUDGE (filtro por mes) --- */
         .stats-nudge {
           display: inline-flex;
           align-items: center;
@@ -840,7 +793,6 @@ export default function AdminEstadisticasPage() {
           .tip { font-size: .8rem; }
         }
 
-        /* --- Botón Volver (branding #009ada) --- */
         .backBtn {
           display: inline-flex;
           align-items: center;
@@ -855,9 +807,7 @@ export default function AdminEstadisticasPage() {
           cursor: pointer;
           text-decoration: none;
         }
-        .backBtn :global(svg) {
-          transform: translateY(-1px);
-        }
+        .backBtn :global(svg) { transform: translateY(-1px); }
         .backBtn:hover {
           background: #e6f7ff;
           border-color: rgba(0,154,218,.25);
