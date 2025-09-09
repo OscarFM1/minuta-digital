@@ -23,7 +23,7 @@ export default function CambiarPasswordPage() {
   const go =
     typeof router.query.go === 'string' && router.query.go.trim().length > 0
       ? router.query.go
-      : '/minutas/estadisticas'
+      : '/mis-minutas' // 👈 fallback actualizado (antes: '/minutas/estadisticas')
 
   const [checking, setChecking] = useState(true)
   const [password, setPassword] = useState('')
