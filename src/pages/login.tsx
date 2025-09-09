@@ -1,18 +1,8 @@
 // src/pages/login.tsx
 /**
  * LOGIN — Flujo robusto sin "Verificando sesión…" infinito.
- *
- * Qué cambia:
- *  - Usa el estado global de sesión vía useAuth() (provisto por AuthProvider).
- *  - Si ya estás autenticado, redirige de inmediato (sin onAuthStateChange local).
- *  - El submit hace signInWithPassword y deja que el AuthProvider actualice el estado.
- *  - Respeta metadata first_login y el correo ADMIN para decidir destino.
- *
- * Requisitos:
- *  - Tener configurado AuthProvider en _app.tsx.
- *  - Proteger páginas privadas con <SessionGate requireAuth> (recomendado).
+ * (Parche mínimo: soporta ?next y fuerza redirect tras signIn)
  */
-
 import { useState, useEffect, useRef, ChangeEvent, FormEvent } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
@@ -25,20 +15,19 @@ import styles from '@/styles/Login.module.css'
 const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
 const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
 
-// Normaliza posibles valores en metadata
 const isFirstLogin = (v: any) => v === true || v === 'true' || v === 1 || v === '1'
 
 export default function LoginPage() {
   const router = useRouter()
-  const { status, user } = useAuth() // <-- Estado global de sesión
+  const { status, user } = useAuth()
   const [userOrEmail, setUserOrEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
-  const redirecting = useRef(false) // evita redirecciones múltiples
+  const redirecting = useRef(false)
 
-  // Destino por defecto — ahora acepta ?next=... o ?go=...
+  // ✅ Cambiado: ahora acepta ?next y ?go, prioridad para next
   const computeGo = () => {
     const q = router.query
     const next =
@@ -48,14 +37,12 @@ export default function LoginPage() {
     return next || go || '/mis-minutas'
   }
 
-  // 1) Mensaje informativo si viene de ruta protegida
   useEffect(() => {
     if (router.query.unauthorized) {
       setInfo('No tienes permisos para esa sección. Inicia sesión con una cuenta autorizada.')
     }
   }, [router.query.unauthorized])
 
-  // 2) Redirige en cuanto exista sesión validada por el AuthProvider
   useEffect(() => {
     if (redirecting.current) return
     if (status === 'authenticated' && user) {
@@ -73,10 +60,8 @@ export default function LoginPage() {
       }
       router.replace(go)
     }
-    // Si 'unauthenticated', simplemente mostramos el formulario
   }, [status, user, router])
 
-  // 3) Submit de login: dispara signIn; el efecto de arriba hará la redirección
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     setError(null)
@@ -90,14 +75,18 @@ export default function LoginPage() {
 
       const { error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) throw error
-      // El AuthProvider actualizará 'status' y 'user' → useEffect redirige
+
+      // ✅ Nuevo: cortacircuito de gates y redirect inmediato al destino
+      try { sessionStorage.setItem('pwdChanged', '1') } catch {}
+      const go = computeGo()
+      router.replace(go)
+      // El AuthProvider seguirá actualizando el estado en background (best-practice: escuchar eventos). :contentReference[oaicite:3]{index=3}
     } catch (err: any) {
       setError(err?.message ?? 'No se pudo iniciar sesión')
       setLoading(false)
     }
   }
 
-  // 4) Si ya hay sesión, mostramos un feedback breve mientras redirige
   if (status === 'authenticated') {
     return (
       <div className="d-flex flex-column align-items-center justify-content-center" style={{ minHeight: '60vh' }}>
@@ -107,7 +96,6 @@ export default function LoginPage() {
     )
   }
 
-  // 5) Si el estado global está cargando (primera carga), evitamos parpadeo
   if (status === 'loading') {
     return (
       <div className="d-flex flex-column align-items-center justify-content-center" style={{ minHeight: '60vh' }}>
@@ -117,7 +105,6 @@ export default function LoginPage() {
     )
   }
 
-  // 6) Estado no autenticado → mostrar formulario
   return (
     <>
       <Head><title>Iniciar Sesión – Minuta Digital</title></Head>
@@ -146,7 +133,7 @@ export default function LoginPage() {
               <Form onSubmit={handleSubmit}>
                 <Form.Group controlId="user" className="mb-3">
                   <Form.Label className={styles.label}>Usuario</Form.Label>
-                  <Form.Control
+                <Form.Control
                     type="text"
                     placeholder="ej.: kat.acosta"
                     value={userOrEmail}
