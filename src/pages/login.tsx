@@ -1,7 +1,10 @@
 // src/pages/login.tsx
 /**
  * LOGIN — Flujo robusto sin "Verificando sesión…" infinito.
- * (Parche mínimo: soporta ?next y fuerza redirect tras signIn)
+ * Redirección por ROL y respeto a must_change_password (profiles).
+ * - worker  -> /mis-minutas
+ * - admin/* -> /minutas
+ * - Si ?next o ?go son compatibles con el rol, se respetan.
  */
 import { useState, useEffect, useRef, ChangeEvent, FormEvent } from 'react'
 import { useRouter } from 'next/router'
@@ -12,10 +15,30 @@ import { supabase } from '@/lib/supabaseClient'
 import { useAuth } from '@/contexts/AuthContext'
 import styles from '@/styles/Login.module.css'
 
-const ADMIN_EMAIL = 'operaciones@multi-impresos.com'
 const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
 
-const isFirstLogin = (v: any) => v === true || v === 'true' || v === 1 || v === '1'
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Helpers locales de destino por rol (sin crear archivos extra)             */
+/* ────────────────────────────────────────────────────────────────────────── */
+type UserRole = 'worker' | 'admin' | 'super_admin'
+const normalizeRole = (r?: string | null): UserRole =>
+  r === 'admin' || r === 'super_admin' ? (r as UserRole) : 'worker'
+const homeForRole = (role?: string | null) =>
+  normalizeRole(role) === 'worker' ? '/mis-minutas' : '/minutas'
+const resolvePostAuthDestination = (role?: string | null, go?: string | null) => {
+  const safe = homeForRole(role)
+  if (!go) return safe
+  try {
+    const u = new URL(go, 'https://dummy.local')
+    const path = u.pathname + (u.search ?? '')
+    const isWorker = normalizeRole(role) === 'worker'
+    const okWorker = path === '/' || path === '/mis-minutas' || path.startsWith('/cambiar-password')
+    const okAdmin  = path === '/' || path.startsWith('/minutas') || path.startsWith('/cambiar-password')
+    return (isWorker ? okWorker : okAdmin) ? path : safe
+  } catch {
+    return safe
+  }
+}
 
 export default function LoginPage() {
   const router = useRouter()
@@ -27,14 +50,14 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const redirecting = useRef(false)
 
-  // ✅ Cambiado: ahora acepta ?next y ?go, prioridad para next
+  // Acepta ?next y ?go (prioridad a next)
   const computeGo = () => {
     const q = router.query
     const next =
       typeof q.next === 'string' && q.next.trim().length > 0 ? q.next.trim() : null
     const go =
       typeof q.go === 'string' && q.go.trim().length > 0 ? q.go.trim() : null
-    return next || go || '/mis-minutas'
+    return next || go || null
   }
 
   useEffect(() => {
@@ -43,22 +66,31 @@ export default function LoginPage() {
     }
   }, [router.query.unauthorized])
 
+  // Si ya estás autenticado, decide destino por rol y must_change_password
   useEffect(() => {
     if (redirecting.current) return
     if (status === 'authenticated' && user) {
-      const go = computeGo()
-      const meta = user.user_metadata
       redirecting.current = true
+      ;(async () => {
+        // Perfil actual
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role, must_change_password')
+          .eq('id', user.id)
+          .single()
 
-      if (isFirstLogin(meta?.first_login)) {
-        router.replace(`/cambiar-password?go=${encodeURIComponent(go)}`)
-        return
-      }
-      if (user.email === ADMIN_EMAIL) {
-        router.replace('/minutas')
-        return
-      }
-      router.replace(go)
+        const go = computeGo()
+
+        // Gate de password por profiles.must_change_password
+        if (profile?.must_change_password === true) {
+          router.replace(`/cambiar-password?go=${encodeURIComponent(go ?? homeForRole(profile?.role))}`)
+          return
+        }
+
+        // Destino por rol
+        const next = resolvePostAuthDestination(profile?.role, go)
+        router.replace(next)
+      })()
     }
   }, [status, user, router])
 
@@ -73,14 +105,37 @@ export default function LoginPage() {
         ? userOrEmail.trim()
         : `${userOrEmail.trim()}@${LOGIN_DOMAIN}`
 
-      const { error } = await supabase.auth.signInWithPassword({ email, password })
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
       if (error) throw error
 
-      // ✅ Nuevo: cortacircuito de gates y redirect inmediato al destino
+      // Cortacircuito temporal (evita re-disparo del gate en la navegación inmediata)
       try { sessionStorage.setItem('pwdChanged', '1') } catch {}
+
+      // Leer perfil justo después del login
+      const uid = data.user?.id
+      let role: UserRole = 'worker'
+      let mustChange = false
+      if (uid) {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role, must_change_password')
+          .eq('id', uid)
+          .single()
+        role = normalizeRole(profile?.role)
+        mustChange = profile?.must_change_password === true
+      }
+
       const go = computeGo()
-      router.replace(go)
-      // El AuthProvider seguirá actualizando el estado en background (best-practice: escuchar eventos). :contentReference[oaicite:3]{index=3}
+
+      // Si debe cambiar contraseña → enviar al gate con ?go
+      if (mustChange) {
+        router.replace(`/cambiar-password?go=${encodeURIComponent(go ?? homeForRole(role))}`)
+        return
+      }
+
+      // Si no, enviar al destino por rol (respetando ?next/?go válidos)
+      const next = resolvePostAuthDestination(role, go)
+      router.replace(next)
     } catch (err: any) {
       setError(err?.message ?? 'No se pudo iniciar sesión')
       setLoading(false)
@@ -133,7 +188,7 @@ export default function LoginPage() {
               <Form onSubmit={handleSubmit}>
                 <Form.Group controlId="user" className="mb-3">
                   <Form.Label className={styles.label}>Usuario</Form.Label>
-                <Form.Control
+                  <Form.Control
                     type="text"
                     placeholder="ej.: kat.acosta"
                     value={userOrEmail}
