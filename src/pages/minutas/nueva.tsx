@@ -2,9 +2,14 @@
 /**
  * Crear nueva minuta (flujo Start/Stop) — SIN inputs de hora
  * ----------------------------------------------------------------------------
+ * - Protegido con SSR: solo 'worker'. Admin/SuperAdmin -> /minutas.
  * - Fecha fija (hoy) no editable en UI.
  * - Crea la minuta con fecha automática + descripción (y opcionales: tarea/novedades).
  * - Tras guardar, redirige a /minutas/[id]#timer para usar exclusivamente Start/Stop.
+ *
+ * Best practices:
+ * - Evitamos leer sesión en cliente: el HOC SSR ya garantizó usuario válido.
+ * - Errores de PG se traducen a mensajes amigables.
  */
 
 import { useState } from 'react'
@@ -14,9 +19,9 @@ import { Form, Button, Card, Alert, Spinner, Row, Col } from 'react-bootstrap'
 import { createMinute } from '@/lib/minutes'
 import ui from '@/styles/NewMinute.module.css'
 import styles from '@/styles/Minutas.module.css'
-import { supabase } from '@/lib/supabaseClient'
+import { withAuthAndPwdGate } from '@/lib/withAuthSSR'
 
-// Helpers de fecha (local, sin zonas raras)
+// ---------- Helpers de fecha (local, sin zonas raras) ----------
 const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`)
 function getTodayISO() {
   const d = new Date()
@@ -30,7 +35,7 @@ function getFriendlyFromISO(iso: string) {
 const TITLE_PLACEHOLDER =
   'Ej.:  Imposición, sangrías y trapping para etiqueta 10×15 cm'
 
-// Utilidad UX: mapea errores técnicos a mensajes amigables
+// ---------- Utilidad UX: mapea errores técnicos a mensajes amigables ----------
 function toFriendlyMessage(err: unknown): string {
   const e = err as any
   const code = e?.code ?? e?.details?.code
@@ -38,13 +43,16 @@ function toFriendlyMessage(err: unknown): string {
   if (code === '23505' || /duplicate key value violates unique constraint/i.test(msg)) {
     return 'Se está asignando el número de minuta. Intenta nuevamente.'
   }
+  if (/permission denied|row-level security/i.test(msg)) {
+    return 'No tienes permisos para crear minutas. Contacta al administrador.'
+  }
   return e?.message ?? e?.error_description ?? 'Ocurrió un error. Intenta más tarde.'
 }
 
 export default function NuevaMinutaPage() {
   const router = useRouter()
 
-  // ⛔️ Ya no guardamos fecha en estado.
+  // Fecha fijada a hoy (no editable)
   const todayISO = getTodayISO()
   const friendlyDate = getFriendlyFromISO(todayISO)
 
@@ -55,13 +63,6 @@ export default function NuevaMinutaPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Guard por sesión básica (si no hay sesión, rebotamos al login)
-  async function ensureSession() {
-    const { data } = await supabase.auth.getUser()
-    if (!data?.user) { router.replace('/login'); return false }
-    return true
-  }
-
   // Submit controlado — SIN horas (las pone Start/Stop en el detalle)
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -69,9 +70,6 @@ export default function NuevaMinutaPage() {
     setSaving(true)
 
     try {
-      const ok = await ensureSession()
-      if (!ok) return
-
       const row = await createMinute({
         date: todayISO,                 // 👈 fija a hoy (no editable en UI)
         start_time: null,
@@ -198,3 +196,23 @@ export default function NuevaMinutaPage() {
     </main>
   )
 }
+
+/**
+ * SSR guard — requiere sesión válida + rol 'worker'
+ * - Si es admin/super_admin, lo enviamos a la vista global de minutas.
+ * - Si no hay sesión, el HOC enviará a /login.
+ */
+export const getServerSideProps = withAuthAndPwdGate(async (_ctx, supabase, user) => {
+  const { data: prof } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (prof?.role === 'admin' || prof?.role === 'super_admin') {
+    return {
+      redirect: { destination: '/minutas', permanent: false },
+    }
+  }
+  return { props: {} }
+})

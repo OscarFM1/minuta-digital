@@ -36,6 +36,11 @@ import styles from '@/styles/Minutas.module.css'
 import { BsPlusLg } from 'react-icons/bs'
 import { useRole } from '@/hooks/useRole'
 import { deleteMinute as apiDeleteMinute } from '@/lib/minutes'
+import { withAuthAndPwdGate } from '@/lib/withAuthSSR'
+// src/pages/mis-minutas.tsx
+
+
+
 
 /** Lista blanca de correos que pueden ver el botón Eliminar (tester). */
 const TEST_DELETE_EMAILS: string[] = (process.env.NEXT_PUBLIC_TEST_DELETE_EMAILS || '')
@@ -135,6 +140,7 @@ export default function MisMinutasPage() {
     </SessionGate>
   )
 }
+export const getServerSideProps = withAuthAndPwdGate()
 
 /* ============================= CONTENIDO worker ============================= */
 
@@ -348,5 +354,7 @@ function DeleteModal({
         </Button>
       </Modal.Footer>
     </Modal>
+    
   )
+  
 }
