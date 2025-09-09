@@ -26,6 +26,7 @@ import {
 import { FiArrowLeft, FiInfo } from 'react-icons/fi'
 import { supabase } from '@/lib/supabaseClient'
 import RequireRole from '@/components/RequireRole' // 🔒 GATING por rol
+import { withAuthAndPwdGate } from '@/lib/withAuthSSR'
 
 // ---------- Recharts: dynamic con { default: ... } + ssr:false ----------
 const ResponsiveContainer = dynamic(
@@ -871,3 +872,18 @@ export default function AdminEstadisticasPage() {
     </RequireRole>
   )
 }
+export const getServerSideProps = withAuthAndPwdGate(async (ctx, supabase, user) => {
+  const { data: prof } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (prof?.role !== 'admin' && prof?.role !== 'super_admin') {
+    return {
+      redirect: { destination: '/mis-minutas?unauthorized=1', permanent: false },
+    }
+  }
+
+  return { props: {} }
+})

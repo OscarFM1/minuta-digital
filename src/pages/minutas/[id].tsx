@@ -26,6 +26,7 @@ import LockTareaRealizada from '@/components/LockTareaRealizada'
 import { getMinuteByIdWithCreator, type MinuteWithCreator } from '@/lib/minutes'
 import { useRole } from '@/hooks/useRole'
 import { WORK_TYPE_LABEL } from '@/types/minute' // 👈 labels amigables de work_type
+import { withAuthAndPwdGate } from '@/lib/withAuthSSR'
 
 type IntervalRow = {
   id: string
@@ -547,3 +548,4 @@ export default function MinuteDetailPage() {
     </SessionGate>
   )
 }
+export const getServerSideProps = withAuthAndPwdGate()

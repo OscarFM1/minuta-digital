@@ -22,6 +22,7 @@ import styles from '@/styles/Minutas.module.css'
 import { useFirstLoginGate } from '@/hooks/useFirstLoginGate'
 import AdminResetPassword from '@/components/AdminResetPassword'
 import RequireRole from '@/components/RequireRole'
+import { withAuthAndPwdGate } from '@/lib/withAuthSSR'
 
 type Filters = { desde?: string; hasta?: string; user?: string }
 type UserOption = { value: string; label: string }
@@ -222,3 +223,18 @@ function AdminMinutasView() {
     </Container>
   )
 }
+export const getServerSideProps = withAuthAndPwdGate(async (ctx, supabase, user) => {
+  const { data: prof } = await supabase
+    .from('profiles')
+    .select('role')
+    .eq('id', user.id)
+    .single()
+
+  if (prof?.role !== 'admin' && prof?.role !== 'super_admin') {
+    return {
+      redirect: { destination: '/mis-minutas?unauthorized=1', permanent: false },
+    }
+  }
+
+  return { props: {} }
+})
