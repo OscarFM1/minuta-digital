@@ -125,7 +125,7 @@ const ALLOWED_EMAILS = Array.from(
 ).filter(e => !STATS_EXCLUDE_EMAILS.includes(e))
 
 const LUNCH_MIN = 60
-const  BREAK_MIN = 20
+const BREAK_MIN = 20
 const REST_PER_DAY_MIN = LUNCH_MIN + BREAK_MIN
 
 const NORMAL_IDLE_MIN = 30 // Tiempo muerto promedio/día
@@ -215,19 +215,14 @@ function downloadCsvFile(filename: string, headers: string[], rows: (string | nu
 }
 
 /* ──────────────────────────────────────────────────────────────────────────
-   Ayuda visual bajo el gráfico diario (faltaba y causaba el error TS)
+   Ayuda visual bajo el gráfico diario (sin “Tiempo muerto” en el modal)
    ────────────────────────────────────────────────────────────────────────── */
 function MetricHelp() {
   return (
     <ul style={{ display: 'grid', gap: 8, marginTop: 8, fontSize: 12, opacity: 0.9 }}>
       <li><strong>Bruto:</strong> Tiempo total entre inicio y fin por día, sin descuentos.</li>
       <li><strong>Descansos:</strong> Bloque fijo diario: 1h 20m (almuerzo + pausas).</li>
-      <li>
-        <strong>Tiempo muerto (ajustado):</strong> {NORMAL_IDLE_MIN}m/día menos la pausa real
-        (botón Pause), limitado entre 0 y {NORMAL_IDLE_MIN}:
-        <code> idle = max(0, {NORMAL_IDLE_MIN} - min(pause, {NORMAL_IDLE_MIN}))</code>.
-      </li>
-      <li><strong>Efectivo:</strong> Bruto – Descansos – Tiempo muerto (nunca negativo).</li>
+      <li><strong>Efectivo:</strong> Bruto – Descansos – (otros ajustes internos).</li>
       <li><strong>Meta:</strong> Objetivo mensual derivado de 44h/semana.</li>
     </ul>
   )
@@ -334,9 +329,7 @@ export default function AdminEstadisticasPage() {
         const restD = g > 0 ? REST_PER_DAY_MIN : 0     // 60 + 20
         const netD  = Math.max(0, g - restD)
 
-        // Idle ajustado por pausas reales:
-        //   idleAdj = max(0, 30 - min(pause, 30))
-        //   y nunca mayor al neto
+        // Idle ajustado (se calcula pero NO se muestra en el modal)
         const idleAdj = Math.max(0, NORMAL_IDLE_MIN - Math.min(pz, NORMAL_IDLE_MIN))
         const idleD   = Math.min(netD, idleAdj)
 
@@ -366,12 +359,12 @@ export default function AdminEstadisticasPage() {
     }))
   }, [dataByUser, expectedMonthEffectiveMin])
 
+  // Para el modal, NO incluimos idleH
   const detailDailyChart = useMemo(() => {
     if (!detail) return []
     return detail.byDay.map(d => ({
       date: d.date.slice(5),
       restH: +(d.restMin / 60).toFixed(2),
-      idleH: +(d.idleMin / 60).toFixed(2),
       effectiveH: +(d.effectiveMin / 60).toFixed(2),
     }))
   }, [detail])
@@ -393,16 +386,17 @@ export default function AdminEstadisticasPage() {
     downloadCsvFile(`resumen-mensual_${ym}.csv`, headers, rowsCsv)
   }
 
+  // (Modal) — CSV sin columna de tiempo muerto
   const onExportDetailCsv = () => {
     if (!detail) return
-    const headers = ['Fecha','Bruto (HH:MM)','Descansos (HH:MM)','Tiempo muerto (promedio) (HH:MM)','Efectivo (HH:MM)']
+    const headers = ['Fecha','Bruto (HH:MM)','Descansos (HH:MM)','Efectivo (HH:MM)']
     const rowsCsv = detail.byDay.map(d => [
-      d.date, minToHhmm(d.grossMin), minToHhmm(d.restMin), minToHhmm(d.idleMin), minToHhmm(d.effectiveMin),
+      d.date, minToHhmm(d.grossMin), minToHhmm(d.restMin), minToHhmm(d.effectiveMin),
     ])
     downloadCsvFile(`detalle_${detail.name.replace(/\s+/g, '')}_${ym}.csv`, headers, rowsCsv)
   }
 
-  // Exportar detalle diario (XLSX) con ambos gráficos como imágenes (robusto)
+  // Exportar detalle diario (XLSX) con ambos gráficos como imágenes (y sin tiempo muerto)
   const onExportDetailXlsx = async () => {
     if (!detail) return
 
@@ -455,11 +449,11 @@ export default function AdminEstadisticasPage() {
     wsCharts.addImage(img1, { tl: { col: 0, row: 1 },  ext: { width: Math.round(dRect.width), height: Math.round(dRect.height) } })
     wsCharts.addImage(img2, { tl: { col: 0, row: 22 }, ext: { width: Math.round(oRect.width), height: Math.round(oRect.height) } })
 
+    // SIN la columna de "Tiempo muerto"
     wsDetail.columns = [
       { header: 'Fecha', width: 12 },
       { header: 'Bruto (HH:MM)', width: 16 },
       { header: 'Descansos (HH:MM)', width: 20 },
-      { header: 'Tiempo muerto (promedio) (HH:MM)', width: 30 },
       { header: 'Efectivo (HH:MM)', width: 18 },
     ]
     detail.byDay.forEach(d => {
@@ -467,7 +461,6 @@ export default function AdminEstadisticasPage() {
         d.date,
         minToHhmm(d.grossMin),
         minToHhmm(d.restMin),
-        minToHhmm(d.idleMin),
         minToHhmm(d.effectiveMin),
       ])
     })
@@ -649,9 +642,9 @@ export default function AdminEstadisticasPage() {
                           <YAxis unit="h" />
                           <Tooltip content={<ChartTooltip />} />
                           <Legend />
-                          <Bar dataKey="restH"      name="Descansos"                stackId="a" fill={PALETTE.rest} />
-                          <Bar dataKey="idleH"      name="Tiempo muerto (promedio)" stackId="a" fill={PALETTE.idle} />
-                          <Bar dataKey="effectiveH" name="Efectivo"                 stackId="a" fill={PALETTE.effective} />
+                          <Bar dataKey="restH"      name="Descansos" stackId="a" fill={PALETTE.rest} />
+                          {/* 🔕 Sin tiempo muerto en el modal */}
+                          <Bar dataKey="effectiveH" name="Efectivo"  stackId="a" fill={PALETTE.effective} />
                           <Line
                             type="monotone"
                             dataKey="effectiveH"
@@ -721,11 +714,9 @@ export default function AdminEstadisticasPage() {
                     <thead>
                       <tr>
                         <th>Fecha</th>
-                        <th className="text-end" title="Tiempo total entre inicio y fin por día, sin descuentos.">
-                          Bruto
-                        </th>
+                        <th className="text-end" title="Tiempo total entre inicio y fin por día, sin descuentos.">Bruto</th>
                         <th className="text-end">Descansos</th>
-                        <th className="text-end">Tiempo muerto (promedio)</th>
+                        {/* 🔕 Sin columna de tiempo muerto */}
                         <th className="text-end">Efectivo</th>
                       </tr>
                     </thead>
@@ -735,7 +726,7 @@ export default function AdminEstadisticasPage() {
                           <td>{d.date}</td>
                           <td className="text-end">{minToHhmm(d.grossMin)}</td>
                           <td className="text-end">{minToHhmm(d.restMin)}</td>
-                          <td className="text-end">{minToHhmm(d.idleMin)}</td>
+                          {/* 🔕 Sin celda de tiempo muerto */}
                           <td className="text-end fw-semibold">{minToHhmm(d.effectiveMin)}</td>
                         </tr>
                       ))}
