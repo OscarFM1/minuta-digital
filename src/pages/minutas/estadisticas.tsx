@@ -94,7 +94,8 @@ const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
 const USERS = [
   { username: 'kat.acosta',   name: 'Katherine.A' },
   { username: 'ivan.zamudio', name: 'Iván Zamudio' },
-  { username: 'audia.mesa',   name: 'Audia Mesa' },
+  // ✅ FIX nombre
+  { username: 'audia.mesa',   name: 'Audra Mesa' },
   { username: 'juan.diaz',    name: 'Juan Díaz' },
   { username: 'kat.blades',   name: 'Katherine.B' },
 ].map(u => ({ ...u, email: `${u.username}@${LOGIN_DOMAIN}`.toLowerCase() }))
@@ -296,6 +297,7 @@ export default function AdminEstadisticasPage() {
 
   /* ===================== Agregación por usuario ===================== */
   const dataByUser: UserAgg[] = useMemo(() => {
+    // base por los usuarios oficiales con sus etiquetas preferidas
     const base: Record<string, UserAgg> = {}
     for (const u of USERS) {
       base[u.email] = {
