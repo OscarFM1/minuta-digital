@@ -94,11 +94,16 @@ const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
 const USERS = [
   { username: 'kat.acosta',   name: 'Katherine.A' },
   { username: 'ivan.zamudio', name: 'Iván Zamudio' },
-  // ✅ FIX nombre
-  { username: 'audia.mesa',   name: 'Audra Mesa' },
+  // ✅ FIX: nombre + correo correctos
+  { username: 'audra.mesa',   name: 'Audra Mesa' },
   { username: 'juan.diaz',    name: 'Juan Díaz' },
   { username: 'kat.blades',   name: 'Katherine.B' },
 ].map(u => ({ ...u, email: `${u.username}@${LOGIN_DOMAIN}`.toLowerCase() }))
+
+/** Alias para normalizar correos históricos del RPC (audia -> audra) */
+const EMAIL_ALIASES: Record<string, string> = {
+  [`audia.mesa@${LOGIN_DOMAIN}`.toLowerCase()]: `audra.mesa@${LOGIN_DOMAIN}`.toLowerCase(),
+}
 
 /** Emails extra a incluir (por si agregas más staff sin tocar código) */
 const EXTRA_ALLOWED = Array.from(
@@ -120,10 +125,17 @@ const STATS_EXCLUDE_EMAILS = Array.from(
   )
 )
 
-/** Lista final de correos permitidos en consulta (sin los excluidos) */
-const ALLOWED_EMAILS = Array.from(
-  new Set([...USERS.map(u => u.email), ...EXTRA_ALLOWED])
-).filter(e => !STATS_EXCLUDE_EMAILS.includes(e))
+/** Lista de correos base (incluye alias para no perder datos históricos) */
+const ALLOWED_EMAILS_RAW = Array.from(
+  new Set([
+    ...USERS.map(u => u.email),
+    ...Object.keys(EMAIL_ALIASES), // ← incluye alias (p. ej. audia.mesa@…)
+    ...EXTRA_ALLOWED,
+  ])
+)
+
+/** Lista final (sin excluidos) */
+const ALLOWED_EMAILS = ALLOWED_EMAILS_RAW.filter(e => !STATS_EXCLUDE_EMAILS.includes(e))
 
 const LUNCH_MIN = 60
 const BREAK_MIN = 20
@@ -277,16 +289,24 @@ export default function AdminEstadisticasPage() {
         const { data, error } = await supabase.rpc('minute_daily_summary', {
           p_start: startISO,
           p_end: endISO,
-          p_emails: ALLOWED_EMAILS,
+          p_emails: ALLOWED_EMAILS, // incluye alias
         })
         if (error) throw error
 
-        const safe: RpcRow[] = (data ?? []).filter((r: RpcRow) => {
+        // 1) Filtra por allowlist (ya contiene alias) y excluidos
+        const filtered: RpcRow[] = (data ?? []).filter((r: RpcRow) => {
           const mail = (r?.email || '').toLowerCase()
           return ALLOWED_EMAILS.includes(mail) && !STATS_EXCLUDE_EMAILS.includes(mail)
         })
 
-        setRpcDaily(safe)
+        // 2) Normaliza alias → correo oficial (audia → audra)
+        const normalized: RpcRow[] = filtered.map(r => {
+          const key = (r.email || '').toLowerCase()
+          const alias = EMAIL_ALIASES[key]
+          return alias ? { ...r, email: alias } : r
+        })
+
+        setRpcDaily(normalized)
       } catch (e: any) {
         setError(e?.message ?? 'No se pudieron cargar las minutas.')
       } finally {
@@ -798,7 +818,7 @@ export default function AdminEstadisticasPage() {
           font-weight: 600;
           line-height: 1;
           cursor: pointer;
-          text-decoration: none;
+          text-decoration: none.
         }
         .backBtn :global(svg) { transform: translateY(-1px); }
         .backBtn:hover {
