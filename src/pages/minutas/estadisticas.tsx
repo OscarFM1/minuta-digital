@@ -92,12 +92,13 @@ const LOGIN_DOMAIN = process.env.NEXT_PUBLIC_LOGIN_DOMAIN || 'login.local'
  * Lista de usuarios "oficiales" a mostrar en el tablero
  * ==========================================================================*/
 const USERS = [
-  { username: 'kat.acosta',   name: 'Katherine.A' },
-  { username: 'ivan.zamudio', name: 'Iván Zamudio' },
-  // ✅ FIX: nombre + correo correctos
-  { username: 'audra.mesa',   name: 'Audra Mesa' },
-  { username: 'juan.diaz',    name: 'Juan Díaz' },
-  { username: 'kat.blades',   name: 'Katherine.B' },
+  { username: 'ivan.zamudio',   name: 'Iván Zamudio' },
+  { username: 'kat.acosta',     name: 'Katherin Acosta' },
+  { username: 'audra.mesa',     name: 'Audra Mesa' },          // ✅ corregido
+  { username: 'juan.diaz',      name: 'Juan Díaz' },
+  { username: 'kat.blades',     name: 'Katherine Blades' },
+  { username: 'edwin.pedraza',  name: 'Edwin Pedraza' },       // ✅ nuevo
+  { username: 'cris.cardenas',  name: 'Cristóbal Cárdenas' },  // ✅ nuevo
 ].map(u => ({ ...u, email: `${u.username}@${LOGIN_DOMAIN}`.toLowerCase() }))
 
 /** Alias para normalizar correos históricos del RPC (audia -> audra) */
@@ -818,7 +819,7 @@ export default function AdminEstadisticasPage() {
           font-weight: 600;
           line-height: 1;
           cursor: pointer;
-          text-decoration: none.
+          text-decoration: none;
         }
         .backBtn :global(svg) { transform: translateY(-1px); }
         .backBtn:hover {
