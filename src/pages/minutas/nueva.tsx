@@ -5,9 +5,10 @@
  * - Fecha fija (hoy) no editable en UI.
  * - Crea la minuta con fecha automática + descripción (y opcionales: tarea/novedades).
  * - Tras guardar, redirige a /minutas/[id]#timer para usar exclusivamente Start/Stop.
+ * - ✅ Incluye checklist de comerciales (public.comerciales) y guarda en public.minuta_comercial.
  */
 
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
 import { Form, Button, Card, Alert, Spinner, Row, Col } from 'react-bootstrap'
@@ -41,6 +42,8 @@ function toFriendlyMessage(err: unknown): string {
   return e?.message ?? e?.error_description ?? 'Ocurrió un error. Intenta más tarde.'
 }
 
+type Comercial = { email: string; nombre: string }
+
 export default function NuevaMinutaPage() {
   const router = useRouter()
 
@@ -55,6 +58,12 @@ export default function NuevaMinutaPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Comerciales (checklist)
+  const [comerciales, setComerciales] = useState<Comercial[]>([])
+  const [selectedEmails, setSelectedEmails] = useState<string[]>([])
+  const [loadingCom, setLoadingCom] = useState<boolean>(false)
+  const [warnAssign, setWarnAssign] = useState<string | null>(null)
+
   // Guard por sesión básica (si no hay sesión, rebotamos al login)
   async function ensureSession() {
     const { data } = await supabase.auth.getUser()
@@ -62,16 +71,53 @@ export default function NuevaMinutaPage() {
     return true
   }
 
+  // Carga comerciales activos para el checklist
+  useEffect(() => {
+    let mounted = true
+    ;(async () => {
+      setLoadingCom(true)
+      try {
+        const { data, error } = await supabase
+          .from('comerciales')
+          .select('email,nombre')
+          .eq('activo', true)
+          .order('nombre', { ascending: true })
+
+        if (error) throw error
+        if (!mounted) return
+        setComerciales(data ?? [])
+      } catch (e) {
+        // No bloquea la creación de minuta; solo informa.
+        console.error('No se pudieron cargar los comerciales:', e)
+        setWarnAssign('No se pudieron cargar los comerciales. Podrás asignarlos más tarde desde el detalle.')
+      } finally {
+        if (mounted) setLoadingCom(false)
+      }
+    })()
+    return () => { mounted = false }
+  }, [])
+
+  // Maneja selección (evita duplicados con Set)
+  const toggleEmail = (email: string) => {
+    setSelectedEmails(prev => {
+      const s = new Set(prev)
+      if (s.has(email)) s.delete(email); else s.add(email)
+      return Array.from(s)
+    })
+  }
+
   // Submit controlado — SIN horas (las pone Start/Stop en el detalle)
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
+    setWarnAssign(null)
     setSaving(true)
 
     try {
       const ok = await ensureSession()
       if (!ok) return
 
+      // 1) Crea la minuta
       const row = await createMinute({
         date: todayISO,                 // 👈 fija a hoy (no editable en UI)
         start_time: null,
@@ -81,6 +127,19 @@ export default function NuevaMinutaPage() {
         novedades: novedades || null,
         is_protected: false,
       })
+
+      // 2) Asigna comerciales (no bloqueante: si falla, la minuta queda creada)
+      try {
+        const emails = Array.from(new Set(selectedEmails)).filter(Boolean)
+        if (row?.id && emails.length > 0) {
+          const rows = emails.map(email => ({ minuta_id: row.id, comercial_email: email }))
+          const { error: relErr } = await supabase.from('minuta_comercial').insert(rows)
+          if (relErr) throw relErr
+        }
+      } catch (e) {
+        console.error('Minuta creada pero falló la asignación de comerciales:', e)
+        setWarnAssign('La minuta se creó, pero no se pudieron asignar los comerciales. Puedes hacerlo desde el detalle.')
+      }
 
       // ✅ Redirige al detalle aterrizando en el bloque del cronómetro (Start)
       router.replace(`/minutas/${row.id}#timer`)
@@ -115,6 +174,11 @@ export default function NuevaMinutaPage() {
             {error && (
               <Alert variant="danger" onClose={() => setError(null)} dismissible className="mb-3">
                 {error}
+              </Alert>
+            )}
+            {warnAssign && (
+              <Alert variant="warning" onClose={() => setWarnAssign(null)} dismissible className="mb-3">
+                {warnAssign}
               </Alert>
             )}
 
@@ -164,6 +228,46 @@ export default function NuevaMinutaPage() {
                       onChange={(e) => setNovedades(e.target.value)}
                       placeholder="Anota novedades, incidencias o notas del trabajo"
                     />
+                  </Form.Group>
+                </Col>
+
+                {/* ✅ Checklist de comerciales */}
+                <Col md={12}>
+                  <Form.Group controlId="comerciales">
+                    <Form.Label>¿Para qué comercial(es) es esta actividad?</Form.Label>
+                    <div
+                      style={{
+                        border: '1px solid rgba(255,255,255,0.1)',
+                        borderRadius: 6,
+                        padding: 10,
+                        maxHeight: 220,
+                        overflow: 'auto',
+                        background: '#0c1626',
+                      }}
+                    >
+                      {loadingCom ? (
+                        <div className="d-flex align-items-center gap-2">
+                          <Spinner size="sm" animation="border" /> Cargando comerciales…
+                        </div>
+                      ) : comerciales.length === 0 ? (
+                        <div className="text-muted small">No hay comerciales activos.</div>
+                      ) : (
+                        comerciales.map((c) => (
+                          <Form.Check
+                            key={c.email}
+                            id={`com-${c.email}`}
+                            type="checkbox"
+                            label={`${c.nombre} — ${c.email}`}
+                            checked={selectedEmails.includes(c.email)}
+                            onChange={() => toggleEmail(c.email)}
+                            className="mb-1"
+                          />
+                        ))
+                      )}
+                    </div>
+                    <div className="text-muted small mt-1">
+                      Puedes seleccionar uno o varios.
+                    </div>
                   </Form.Group>
                 </Col>
 
