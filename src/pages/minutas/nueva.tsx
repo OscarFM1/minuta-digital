@@ -6,6 +6,7 @@
  * - Crea la minuta con fecha automática + descripción (y opcionales: tarea/novedades).
  * - Tras guardar, redirige a /minutas/[id]#timer para usar exclusivamente Start/Stop.
  * - ✅ Incluye checklist de comerciales (public.comerciales) y guarda en public.minuta_comercial.
+ * - ✅ Reintento automático (23505/40001) al asignar número de minuta.
  */
 
 import { useEffect, useState } from 'react'
@@ -42,12 +43,33 @@ function toFriendlyMessage(err: unknown): string {
   return e?.message ?? e?.error_description ?? 'Ocurrió un error. Intenta más tarde.'
 }
 
+/** Reintenta N veces para conflictos de llave única o serialización */
+async function withRetry<T>(fn: () => Promise<T>, times = 3, delayMs = 250): Promise<T> {
+  let attempt = 0
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms + Math.floor(Math.random() * 80)))
+  while (true) {
+    try {
+      return await fn()
+    } catch (e: any) {
+      const code = e?.code ?? e?.details?.code
+      const msg = String(e?.message ?? '')
+      const isDupe = code === '23505' || /duplicate key value/i.test(msg)
+      const isSerialization = code === '40001'
+      if (attempt < times - 1 && (isDupe || isSerialization)) {
+        attempt++
+        await sleep(delayMs * attempt)
+        continue
+      }
+      throw e
+    }
+  }
+}
+
 type Comercial = { email: string; nombre: string }
 
 export default function NuevaMinutaPage() {
   const router = useRouter()
 
-  // ⛔️ Ya no guardamos fecha en estado.
   const todayISO = getTodayISO()
   const friendlyDate = getFriendlyFromISO(todayISO)
 
@@ -87,7 +109,6 @@ export default function NuevaMinutaPage() {
         if (!mounted) return
         setComerciales(data ?? [])
       } catch (e) {
-        // No bloquea la creación de minuta; solo informa.
         console.error('No se pudieron cargar los comerciales:', e)
         setWarnAssign('No se pudieron cargar los comerciales. Podrás asignarlos más tarde desde el detalle.')
       } finally {
@@ -117,18 +138,18 @@ export default function NuevaMinutaPage() {
       const ok = await ensureSession()
       if (!ok) return
 
-      // 1) Crea la minuta
-      const row = await createMinute({
-        date: todayISO,                 // 👈 fija a hoy (no editable en UI)
+      // 1) Crea la minuta con reintento automático ante 23505/40001
+      const row = await withRetry(() => createMinute({
+        date: todayISO,
         start_time: null,
         end_time: null,
         description: description || null,
         tarea_realizada: tarea || null,
         novedades: novedades || null,
         is_protected: false,
-      })
+      }), 3, 250)
 
-      // 2) Asigna comerciales (no bloqueante: si falla, la minuta queda creada)
+      // 2) Asigna comerciales (no bloqueante)
       try {
         const emails = Array.from(new Set(selectedEmails)).filter(Boolean)
         if (row?.id && emails.length > 0) {
@@ -231,7 +252,7 @@ export default function NuevaMinutaPage() {
                   </Form.Group>
                 </Col>
 
-                {/* ✅ Checklist de comerciales */}
+                {/* ✅ Checklist de comerciales (solo nombre, sin correo en el label) */}
                 <Col md={12}>
                   <Form.Group controlId="comerciales">
                     <Form.Label>¿Para qué comercial(es) es esta actividad?</Form.Label>
@@ -257,7 +278,8 @@ export default function NuevaMinutaPage() {
                             key={c.email}
                             id={`com-${c.email}`}
                             type="checkbox"
-                            label={`${c.nombre} — ${c.email}`}
+                            label={c.nombre}               // 👈 solo nombre
+                            title={c.email}                // (opcional) visible al pasar el mouse
                             checked={selectedEmails.includes(c.email)}
                             onChange={() => toggleEmail(c.email)}
                             className="mb-1"
