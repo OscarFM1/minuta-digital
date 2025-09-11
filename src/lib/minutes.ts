@@ -3,14 +3,10 @@
  * Capa de acceso a datos para MINUTAS
  * ============================================================================
  * Cambios clave:
- * - `createMinute` usa RPC sin ambigüedad:
- *    1) intenta `public.create_minute_safe_v2`
- *    2) fallback a `public.create_minute_safe` pasando TODOS los params
- * - Manejo robusto de errores de concurrencia (23505) con mensaje UX claro.
- * - No existen inserts directos a `public.minute` para crear minutas.
- *
- * Resto:
- * - Utilidades para update/listado/start/stop y helpers varios.
+ * - `createMinute` llama EXCLUSIVAMENTE a `public.create_minute_safe_v2`
+ *   (RPC sin sobrecarga ⇒ cero ambigüedad en PostgREST).
+ * - Manejo claro de 23505 (concurrencia) y 42883 (RPC no encontrada).
+ * - Cero inserts directos a `public.minute` para crear minutas.
  */
 
 import { supabase } from '@/lib/supabaseClient'
@@ -23,35 +19,24 @@ type WorkType = (typeof WORK_TYPE_VALUES)[number]
 // Utils
 // ---------------------------------------------------------------------------
 
-function delay(ms: number) { return new Promise(res => setTimeout(res, ms)) }
-
-/** Borra claves con `undefined` (evita enviar basura en PATCH/INSERT). */
 function pruneUndefined<T extends Record<string, any>>(obj: T): T {
   const out: any = {}
   for (const k of Object.keys(obj)) if (obj[k] !== undefined) out[k] = obj[k]
   return out
 }
-
-/** Borra campos prohibidos antes de enviar a BD. */
 function sanitize<T extends Record<string, any>>(obj: T, forbidden: string[]): T {
   const clone: any = { ...obj }
   for (const k of forbidden) delete clone[k]
   return clone
 }
-
-/** Normaliza string vacío → null (para date/time/text opcionales). */
 function emptyToNull<T extends string | null | undefined>(v: T): string | null {
   if (v === undefined || v === null) return null
   const s = String(v).trim()
   return s === '' ? null : s
 }
-
-/** YYYY-MM-DD (hoy) — Útil para respetar NOT NULL en `date`. */
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10)
 }
-
-/** Normaliza a WorkType válido o null si inválido. */
 function normalizeWorkType(v?: string | null): WorkType | null {
   if (!v) return null
   const s = String(v).trim().toLowerCase().replace(/\s+/g, '_')
@@ -72,11 +57,9 @@ async function hasColumn(col: string): Promise<boolean> {
   columnExistsCache[col] = ok
   return ok
 }
-
 async function hasDescriptionColumn() { return hasColumn('description') }
 async function hasWorkTypeColumn() { return hasColumn('work_type') }
 
-/** Detecta la columna de “dueño” para filtros de listado. */
 async function detectOwnerColumn(): Promise<'user_id' | 'created_by' | 'none'> {
   if (ownerColumnCache) return ownerColumnCache
   {
@@ -100,7 +83,6 @@ async function getCurrentUserId(): Promise<string> {
   if (error || !data.user) throw new Error('No hay sesión activa.')
   return data.user.id
 }
-
 async function getCurrentUserIdentity(): Promise<{ name: string | null; email: string | null }> {
   const { data } = await supabase.auth.getUser()
   const u = data.user
@@ -121,16 +103,11 @@ async function getCurrentUserIdentity(): Promise<{ name: string | null; email: s
 /**
  * createMinute
  * ----------------------------------------------------------------------------
- * Crea una minuta vía RPC:
- *  - Primero `public.create_minute_safe_v2` (wrapper sin sobrecarga).
- *  - Si no existe, usa `public.create_minute_safe` pasando TODOS los parámetros
- *    de la firma larga para eliminar ambigüedad.
- *
+ * Crea una minuta vía RPC `public.create_minute_safe_v2` (sin sobrecargas).
  * Tras crear:
- *  - Parche best-effort de `created_by_name` / `created_by_email` si existen.
- *  - Parche de `work_type` (validado) y `is_protected` (si se pidió) si existen.
- *
- * Notas: `start_time`/`end_time` se gestionan con `minute_start/stop`.
+ *  - Parche best-effort: `created_by_*`, `work_type`, `is_protected` si existen columnas.
+ * Notas:
+ *  - `start_time`/`end_time` se gestionan con `minute_start/stop`.
  */
 export async function createMinute(input: {
   date?: string | null
@@ -148,77 +125,53 @@ export async function createMinute(input: {
   const safeDate = emptyToNull(input.date ?? null) || todayISO()
   const wt = normalizeWorkType(input.work_type ?? null)
 
-  // ---------- 1) Intento con wrapper sin sobrecarga ----------
-  let row: Minute | null = null
-  {
-    const { data, error } = await supabase.rpc('create_minute_safe_v2', {
-      p_date: safeDate,
-      p_description: emptyToNull(input.description ?? null),
-      p_tarea: emptyToNull(input.tarea_realizada ?? null),
-      p_novedades: emptyToNull(input.novedades ?? null),
-      p_work_type: wt,
-    })
+  // 1) Creación atómica por RPC v2 (nombre único, sin ambigüedad)
+  const { data, error } = await supabase.rpc('create_minute_safe_v2', {
+    p_date: safeDate,
+    p_description: emptyToNull(input.description ?? null),
+    p_tarea: emptyToNull(input.tarea_realizada ?? null),
+    p_novedades: emptyToNull(input.novedades ?? null),
+    p_work_type: wt,
+  })
 
-    if (!error && data) {
-      row = data as Minute
-    } else if (error && !/function .* does not exist|RPC|42883/i.test(error.message || '')) {
-      // Si falló por otra razón que no sea "no existe", propaga con UX clara
-      if (error.code === '23505' || /reintentos/i.test(error.message || '')) {
-        throw new Error('Se está asignando el número de minuta. Intenta nuevamente.')
-      }
-      throw new Error(error?.message ?? 'No fue posible crear la minuta.')
+  if (error) {
+    // 42883 => función no existe
+    if (error.code === '42883') {
+      throw new Error(
+        'RPC create_minute_safe_v2 no encontrada. Aplica la migración SQL que crea el wrapper v2 (sin sobrecargas).'
+      )
     }
+    // 23505 => colisión por concurrencia (la RPC debería reintentar, pero mostramos UX clara)
+    if (error.code === '23505' || /reintentos/i.test(error.message || '')) {
+      throw new Error('Se está asignando el número de minuta. Intenta nuevamente.')
+    }
+    throw new Error(error?.message ?? 'No fue posible crear la minuta.')
   }
 
-  // ---------- 2) Fallback: función original pasando TODOS los params ----------
-  if (!row) {
-    const { data, error } = await supabase.rpc('create_minute_safe', {
-      p_date: safeDate,
-      p_description: emptyToNull(input.description ?? null),
-      p_tarea: emptyToNull(input.tarea_realizada ?? null),
-      p_novedades: emptyToNull(input.novedades ?? null),
-      p_is_protected: typeof input.is_protected === 'boolean' ? input.is_protected : false,
-      p_start_time: null,
-      p_end_time: null,
-      p_work_type: wt,
-    })
+  const row = data as Minute
 
-    if (error) {
-      if (error.code === '23505' || /reintentos/i.test(error.message || '')) {
-        throw new Error('Se está asignando el número de minuta. Intenta nuevamente.')
-      }
-      throw new Error(error?.message ?? 'No fue posible crear la minuta.')
-    }
-
-    row = data as Minute
-  }
-
-  // 3) Parche opcional (best-effort) en la fila recién creada
+  // 2) Parche opcional (best-effort): nombre/email, work_type e is_protected
   try {
     const patch: Record<string, any> = {}
-
-    if (name && (await hasColumn('created_by_name'))) patch.created_by_name = name
+    if (name && (await hasColumn('created_by_name')))  patch.created_by_name  = name
     if (email && (await hasColumn('created_by_email'))) patch.created_by_email = email
-    if (wt && (await hasWorkTypeColumn())) patch.work_type = wt
+    if (wt && (await hasWorkTypeColumn()))              patch.work_type        = wt
     if (typeof input.is_protected === 'boolean' && (await hasColumn('is_protected'))) {
       patch.is_protected = input.is_protected
     }
-
     if (Object.keys(patch).length > 0) {
       await supabase.from('minute').update(patch).eq('id', (row as any).id)
     }
   } catch (e) {
-    // No rompemos el flujo si falla el parche; la minuta ya quedó creada
     console.warn('[createMinute] Patch opcional omitido:', e)
   }
 
-  return row as Minute
+  return row
 }
 
 /**
  * updateMinute
- *  - Aplica un patch seguro (nunca toca `folio`/`folio_serial` ni dueño).
- *  - Devuelve la fila actualizada.
+ *  - Patch seguro (nunca toca `folio`/`folio_serial` ni dueño).
  */
 export async function updateMinute(
   id: string,
@@ -245,16 +198,10 @@ export async function updateMinute(
   if (patch.novedades !== undefined)       normalized.novedades       = emptyToNull(patch.novedades)
   if (patch.is_protected !== undefined)    normalized.is_protected    = patch.is_protected
   if (patch.description !== undefined)     normalized.description     = emptyToNull(patch.description)
-
-  if (patch.work_type !== undefined) {
-    normalized.work_type = normalizeWorkType(patch.work_type)
-  }
+  if (patch.work_type !== undefined)       normalized.work_type       = normalizeWorkType(patch.work_type)
 
   const safe = sanitize(pruneUndefined(normalized), [
-    'folio',
-    'folio_serial',
-    'user_id',
-    'created_by',
+    'folio', 'folio_serial', 'user_id', 'created_by',
   ])
 
   if ('description' in safe && safe.description && !(await hasDescriptionColumn())) {
@@ -363,9 +310,7 @@ export async function deleteMinute(
     .select('id, path')
     .eq('minute_id', minuteId)
 
-  if (selErr) {
-    console.warn('[deleteMinute] No se pudieron leer adjuntos:', selErr)
-  }
+  if (selErr) console.warn('[deleteMinute] No se pudieron leer adjuntos:', selErr)
 
   const paths = (files ?? [])
     .map((f: any) => f?.path)
@@ -378,7 +323,7 @@ export async function deleteMinute(
     if (rmErr) {
       console.warn('[deleteMinute] Falló borrar archivos de Storage:', rmErr)
     } else {
-      storageRemoved = attachmentsFound
+      // si no hay error asumimos todos removidos
     }
   }
 
@@ -388,11 +333,7 @@ export async function deleteMinute(
     .eq('minute_id', minuteId)
     .select('id')
 
-  if (delAttErr) {
-    console.info('[deleteMinute] Borrado attachment omitible:', delAttErr)
-  } else {
-    attachmentsDeleted = delAttRows?.length ?? 0
-  }
+  if (delAttErr) console.info('[deleteMinute] Borrado attachment omitible:', delAttErr)
 
   const { error: delMinErr } = await supabase
     .from('minute')
@@ -402,7 +343,7 @@ export async function deleteMinute(
 
   if (delMinErr) throw delMinErr
 
-  return { minuteId, attachmentsFound, storageRemoved, attachmentsDeleted }
+  return { minuteId, attachmentsFound, storageRemoved: paths.length, attachmentsDeleted: delAttRows?.length ?? 0 }
 }
 
 // ---------------------------------------------------------------------------
