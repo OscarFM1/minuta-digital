@@ -3,13 +3,13 @@
  * Capa de acceso a datos para MINUTAS
  * ============================================================================
  * Cambios clave:
- * - `createMinute` ahora usa la **RPC `public.create_minute_safe`** para
- *   insertar la minuta y asignar el folio/serial de forma atómica en la BD.
- *   -> Evita conflictos 409/23505 por condiciones de carrera.
- * - Ya NO hacemos insert directo a `public.minute` para crear.
+ * - `createMinute` usa EXCLUSIVAMENTE la RPC `public.create_minute_safe`
+ *   para crear la minuta y asignar `folio_serial/folio` de forma atómica.
+ * - Manejo robusto de errores de concurrencia (23505) con mensaje UX claro.
+ * - No existen inserts directos a `public.minute` para crear minutas.
  *
  * Resto:
- * - Sigue habiendo utilidades para update/listado/start/stop y helpers varios.
+ * - Utilidades para update/listado/start/stop y helpers varios.
  */
 
 import { supabase } from '@/lib/supabaseClient'
@@ -31,7 +31,7 @@ function pruneUndefined<T extends Record<string, any>>(obj: T): T {
   return out
 }
 
-/** Limpia campos prohibidos antes de enviar a BD. */
+/** Borra campos prohibidos antes de enviar a BD. */
 function sanitize<T extends Record<string, any>>(obj: T, forbidden: string[]): T {
   const clone: any = { ...obj }
   for (const k of forbidden) delete clone[k]
@@ -50,7 +50,7 @@ function todayISO(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
-/** Normaliza un valor arbitrario a WorkType (case/espacios → snake) o null si inválido. */
+/** Normaliza a WorkType válido o null si inválido. */
 function normalizeWorkType(v?: string | null): WorkType | null {
   if (!v) return null
   const s = String(v).trim().toLowerCase().replace(/\s+/g, '_')
@@ -120,17 +120,20 @@ async function getCurrentUserIdentity(): Promise<{ name: string | null; email: s
 /**
  * createMinute
  * ----------------------------------------------------------------------------
- * Inserta una minuta **vía RPC** `public.create_minute_safe`, que asigna
- * `folio_serial/folio` en la BD de manera atómica (sin 409/23505).
+ * Crea una minuta vía RPC `public.create_minute_safe` (lado BD asigna
+ * `folio_serial/folio` de forma atómica).
  *
  * Tras crear:
- *  - Actualiza opcionalmente `created_by_name` / `created_by_email` si existen.
- *  - Aplica `work_type` si la columna existe y el valor es válido.
+ *  - Parche best-effort de `created_by_name` / `created_by_email` si existen.
+ *  - Parche de `work_type` (validado) y `is_protected` (si se pidió) si existen.
+ *
+ * Notas:
+ * - `start_time`/`end_time` se gestionan con las RPC `minute_start/stop`.
  */
 export async function createMinute(input: {
   date?: string | null
-  start_time?: string | null   // ignorado en la RPC (lo gestiona el timer)
-  end_time?: string | null     // ignorado en la RPC
+  start_time?: string | null   // ignorado en la creación (usa minute_start)
+  end_time?: string | null     // ignorado en la creación (usa minute_stop)
   tarea_realizada?: string | null
   novedades?: string | null
   is_protected?: boolean
@@ -143,23 +146,26 @@ export async function createMinute(input: {
   const { name, email } = await getCurrentUserIdentity()
   const safeDate = emptyToNull(input.date ?? null) || todayISO()
 
-  // 1) Crear la minuta en BD por RPC (asigna folio/serial de forma segura)
+  // 1) Creación atómica por RPC (no pasar campos no soportados)
   const { data, error } = await supabase.rpc('create_minute_safe', {
     p_date: safeDate,
     p_description: emptyToNull(input.description ?? null),
     p_tarea: emptyToNull(input.tarea_realizada ?? null),
     p_novedades: emptyToNull(input.novedades ?? null),
-    p_is_protected: input.is_protected ?? false,
+    p_work_type: normalizeWorkType(input.work_type ?? null),
   })
 
   if (error) {
-    // Mensaje amigable para errores genéricos
+    // Errores de colisión/concurrencia → UX clara y consistente con UI
+    if (error.code === '23505' || /reintentos/i.test(error.message || '')) {
+      throw new Error('Se está asignando el número de minuta. Intenta nuevamente.')
+    }
     throw new Error(error?.message ?? 'No fue posible crear la minuta.')
   }
 
   const row = data as Minute
 
-  // 2) Parche opcional (best-effort): nombre/email y work_type si existen columnas
+  // 2) Parche opcional (best-effort): nombre/email, work_type e is_protected
   try {
     const patch: Record<string, any> = {}
 
@@ -169,6 +175,10 @@ export async function createMinute(input: {
     const wt = normalizeWorkType(input.work_type ?? null)
     if (wt && (await hasWorkTypeColumn())) patch.work_type = wt
 
+    if (typeof input.is_protected === 'boolean' && (await hasColumn('is_protected'))) {
+      patch.is_protected = input.is_protected
+    }
+
     if (Object.keys(patch).length > 0) {
       await supabase.from('minute').update(patch).eq('id', row.id)
     }
@@ -177,7 +187,6 @@ export async function createMinute(input: {
     console.warn('[createMinute] Patch opcional omitido:', e)
   }
 
-  // start_time / end_time: se gestionan con minute_start / minute_stop
   return row
 }
 
