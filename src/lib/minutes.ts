@@ -3,8 +3,9 @@
  * Capa de acceso a datos para MINUTAS
  * ============================================================================
  * Cambios clave:
- * - `createMinute` usa EXCLUSIVAMENTE la RPC `public.create_minute_safe`
- *   para crear la minuta y asignar `folio_serial/folio` de forma atómica.
+ * - `createMinute` usa RPC sin ambigüedad:
+ *    1) intenta `public.create_minute_safe_v2`
+ *    2) fallback a `public.create_minute_safe` pasando TODOS los params
  * - Manejo robusto de errores de concurrencia (23505) con mensaje UX claro.
  * - No existen inserts directos a `public.minute` para crear minutas.
  *
@@ -120,15 +121,16 @@ async function getCurrentUserIdentity(): Promise<{ name: string | null; email: s
 /**
  * createMinute
  * ----------------------------------------------------------------------------
- * Crea una minuta vía RPC `public.create_minute_safe` (lado BD asigna
- * `folio_serial/folio` de forma atómica).
+ * Crea una minuta vía RPC:
+ *  - Primero `public.create_minute_safe_v2` (wrapper sin sobrecarga).
+ *  - Si no existe, usa `public.create_minute_safe` pasando TODOS los parámetros
+ *    de la firma larga para eliminar ambigüedad.
  *
  * Tras crear:
  *  - Parche best-effort de `created_by_name` / `created_by_email` si existen.
  *  - Parche de `work_type` (validado) y `is_protected` (si se pidió) si existen.
  *
- * Notas:
- * - `start_time`/`end_time` se gestionan con las RPC `minute_start/stop`.
+ * Notas: `start_time`/`end_time` se gestionan con `minute_start/stop`.
  */
 export async function createMinute(input: {
   date?: string | null
@@ -140,54 +142,77 @@ export async function createMinute(input: {
   description?: string | null
   work_type?: string | null
 }): Promise<Minute> {
-  // Forzamos sesión para coherencia con RLS y owner implícito en la RPC
-  await getCurrentUserId()
+  await getCurrentUserId() // coherencia con RLS
 
   const { name, email } = await getCurrentUserIdentity()
   const safeDate = emptyToNull(input.date ?? null) || todayISO()
+  const wt = normalizeWorkType(input.work_type ?? null)
 
-  // 1) Creación atómica por RPC (no pasar campos no soportados)
-  const { data, error } = await supabase.rpc('create_minute_safe', {
-    p_date: safeDate,
-    p_description: emptyToNull(input.description ?? null),
-    p_tarea: emptyToNull(input.tarea_realizada ?? null),
-    p_novedades: emptyToNull(input.novedades ?? null),
-    p_work_type: normalizeWorkType(input.work_type ?? null),
-  })
+  // ---------- 1) Intento con wrapper sin sobrecarga ----------
+  let row: Minute | null = null
+  {
+    const { data, error } = await supabase.rpc('create_minute_safe_v2', {
+      p_date: safeDate,
+      p_description: emptyToNull(input.description ?? null),
+      p_tarea: emptyToNull(input.tarea_realizada ?? null),
+      p_novedades: emptyToNull(input.novedades ?? null),
+      p_work_type: wt,
+    })
 
-  if (error) {
-    // Errores de colisión/concurrencia → UX clara y consistente con UI
-    if (error.code === '23505' || /reintentos/i.test(error.message || '')) {
-      throw new Error('Se está asignando el número de minuta. Intenta nuevamente.')
+    if (!error && data) {
+      row = data as Minute
+    } else if (error && !/function .* does not exist|RPC|42883/i.test(error.message || '')) {
+      // Si falló por otra razón que no sea "no existe", propaga con UX clara
+      if (error.code === '23505' || /reintentos/i.test(error.message || '')) {
+        throw new Error('Se está asignando el número de minuta. Intenta nuevamente.')
+      }
+      throw new Error(error?.message ?? 'No fue posible crear la minuta.')
     }
-    throw new Error(error?.message ?? 'No fue posible crear la minuta.')
   }
 
-  const row = data as Minute
+  // ---------- 2) Fallback: función original pasando TODOS los params ----------
+  if (!row) {
+    const { data, error } = await supabase.rpc('create_minute_safe', {
+      p_date: safeDate,
+      p_description: emptyToNull(input.description ?? null),
+      p_tarea: emptyToNull(input.tarea_realizada ?? null),
+      p_novedades: emptyToNull(input.novedades ?? null),
+      p_is_protected: typeof input.is_protected === 'boolean' ? input.is_protected : false,
+      p_start_time: null,
+      p_end_time: null,
+      p_work_type: wt,
+    })
 
-  // 2) Parche opcional (best-effort): nombre/email, work_type e is_protected
+    if (error) {
+      if (error.code === '23505' || /reintentos/i.test(error.message || '')) {
+        throw new Error('Se está asignando el número de minuta. Intenta nuevamente.')
+      }
+      throw new Error(error?.message ?? 'No fue posible crear la minuta.')
+    }
+
+    row = data as Minute
+  }
+
+  // 3) Parche opcional (best-effort) en la fila recién creada
   try {
     const patch: Record<string, any> = {}
 
     if (name && (await hasColumn('created_by_name'))) patch.created_by_name = name
     if (email && (await hasColumn('created_by_email'))) patch.created_by_email = email
-
-    const wt = normalizeWorkType(input.work_type ?? null)
     if (wt && (await hasWorkTypeColumn())) patch.work_type = wt
-
     if (typeof input.is_protected === 'boolean' && (await hasColumn('is_protected'))) {
       patch.is_protected = input.is_protected
     }
 
     if (Object.keys(patch).length > 0) {
-      await supabase.from('minute').update(patch).eq('id', row.id)
+      await supabase.from('minute').update(patch).eq('id', (row as any).id)
     }
   } catch (e) {
     // No rompemos el flujo si falla el parche; la minuta ya quedó creada
     console.warn('[createMinute] Patch opcional omitido:', e)
   }
 
-  return row
+  return row as Minute
 }
 
 /**
