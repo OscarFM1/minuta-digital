@@ -132,6 +132,7 @@ export async function createMinute(input: {
     p_tarea: emptyToNull(input.tarea_realizada ?? null),
     p_novedades: emptyToNull(input.novedades ?? null),
     p_work_type: wt,
+    p_is_protected: typeof input.is_protected === 'boolean' ? input.is_protected : false, // <-- CAMBIO: añadimos p_is_protected
   })
 
   if (error) {
@@ -141,7 +142,7 @@ export async function createMinute(input: {
         'RPC create_minute_safe_v2 no encontrada. Aplica la migración SQL que crea el wrapper v2 (sin sobrecargas).'
       )
     }
-    // 23505 => colisión por concurrencia (la RPC debería reintentar, pero mostramos UX clara)
+    // 23505 => colisión por concurrencia (la RPC ya reintenta; UX clara)
     if (error.code === '23505' || /reintentos/i.test(error.message || '')) {
       throw new Error('Se está asignando el número de minuta. Intenta nuevamente.')
     }
