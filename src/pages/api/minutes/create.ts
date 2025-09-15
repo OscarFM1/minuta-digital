@@ -1,10 +1,11 @@
 // /src/pages/api/minutes/create.ts
 /**
- * Crear MINUTA vía RPC (API Route) con reintentos de concurrencia
+ * Crear MINUTA vía RPC (API Route) con reintentos + MODO DEBUG opcional
  * ============================================================================
  * - Dual auth: Authorization: Bearer <token> o cookies (getServerSupabase).
- * - Reintenta la RPC ante 23505 (unique_violation) y 40001 (serialization_failure).
+ * - Reintenta ante 23505/40001 con backoff.
  * - minute_create_rpc → fallback create_minute_safe_v2 (42883).
+ * - DEBUG opcional: ?debug=1 o header x-debug: 1 → devuelve code/details/hint/constraint.
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next'
@@ -20,8 +21,14 @@ const normalizeWorkType = (v?: string | null) => {
   return VALID_WORK_TYPES.has(s) ? s : null
 }
 
-/** Backoff con jitter */
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms + Math.floor(Math.random() * 50)))
+
+/** Extrae nombre de constraint de un details típico de Postgres. */
+function extractConstraint(details?: string | null): string | null {
+  if (!details) return null
+  const m = details.match(/constraint\s+"([^"]+)"/i)
+  return m?.[1] ?? null
+}
 
 /** Ejecuta la RPC con reintentos ante 23505/40001 */
 async function callCreateRPC(payload: any, maxRetries = 6) {
@@ -29,38 +36,30 @@ async function callCreateRPC(payload: any, maxRetries = 6) {
   let lastErr: any = null
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
-    // 1) Intento principal
     let { data, error } = await supabaseAdmin.rpc(rpc, payload as any)
 
-    // 2) Fallback si no existe wrapper limpio
     if (error && (error.code === '42883' || /No function matches|not found/i.test(error.message))) {
       rpc = 'create_minute_safe_v2'
       const r2 = await supabaseAdmin.rpc(rpc, payload as any)
       data = r2.data; error = r2.error
     }
 
-    // 3) Éxito
-    if (!error) return { data }
+    if (!error) return { data, rpc }
 
-    lastErr = error
+    lastErr = { ...error, rpc }
     const code = error.code
     const msg = String(error.message || '')
 
-    // 4) ¿Reintentable?
     const isUnique = code === '23505' || /duplicate key value/i.test(msg)
     const isSerialization = code === '40001' || /could not serialize/i.test(msg)
 
     if (isUnique || isSerialization) {
-      // Backoff progresivo (150ms, 250ms, 350ms, …)
       await sleep(150 + attempt * 100)
       continue
     }
-
-    // 5) Errores no reintentables → salir
     break
   }
 
-  // Devuelve el último error si no se pudo resolver
   return { error: lastErr }
 }
 
@@ -69,6 +68,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     res.setHeader('Allow', 'POST')
     return res.status(405).json({ error: 'Method not allowed' })
   }
+
+  const isDebug =
+    req.query.debug === '1' ||
+    String(req.headers['x-debug'] || '').toLowerCase() === '1'
 
   // 1) Resolver usuario: Authorization: Bearer ... (preferido) o cookies
   let userId: string | null = null
@@ -118,26 +121,52 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   // 3) Llamada con reintentos
   const { data, error } = await callCreateRPC(payload, 6)
 
-  // 4) Manejo de errores
+  // 4) Manejo de errores (+ DEBUG opcional)
   if (error) {
-    if (error.code === '23505' || /duplicate key value/i.test(String(error.message || ''))) {
-      // Tras reintentar varias veces, aún hay contención → 409
-      return res.status(409).json({ error: 'Se está asignando el número de minuta. Intenta nuevamente.' })
+    const code = error.code as string | undefined
+    const rpc = error.rpc as string | undefined
+    const details = error.details as string | undefined
+    const hint = error.hint as string | undefined
+    const constraint = extractConstraint(details)
+
+    // Log server para Vercel
+    // eslint-disable-next-line no-console
+    console.error('[minutes/create] RPC error', {
+      rpc, code,
+      message: error.message,
+      details, hint, constraint,
+      payload_dbg: { p_date: payload.p_date, p_user_id: `${userId?.slice(0,8)}…` }
+    })
+
+    // Status apropiado
+    if (code === '23505' || /duplicate key value/i.test(String(error.message || ''))) {
+      const bodyResp: any = { error: 'Se está asignando el número de minuta. Intenta nuevamente.' }
+      if (isDebug) bodyResp.debug = { code, rpc, details, hint, constraint }
+      return res.status(409).json(bodyResp)
     }
-    if (error.code === '40001') {
-      return res.status(409).json({ error: 'Conflicto de serialización. Intenta nuevamente.' })
+    if (code === '40001') {
+      const bodyResp: any = { error: 'Conflicto de serialización. Intenta nuevamente.' }
+      if (isDebug) bodyResp.debug = { code, rpc, details, hint, constraint }
+      return res.status(409).json(bodyResp)
     }
-    if (error.code === '42883') {
-      return res.status(500).json({
-        error: `RPC no encontrada. Aplica la migración SQL y recarga esquema (pg_notify 'pgrst','reload schema').`,
-      })
+    if (code === '42883') {
+      const bodyResp: any = {
+        error: 'RPC no encontrada. Aplica la migración SQL y recarga el esquema.'
+      }
+      if (isDebug) bodyResp.debug = { code, rpc, details, hint, constraint }
+      return res.status(500).json(bodyResp)
     }
     if (/Could not choose the best candidate function/i.test(String(error.message || ''))) {
-      return res.status(500).json({
-        error: 'RPC ambigua por sobrecargas antiguas. Deja una sola firma con p_user_id (7 args).',
-      })
+      const bodyResp: any = {
+        error: 'RPC ambigua por sobrecargas antiguas. Deja una sola firma con p_user_id (7 args).'
+      }
+      if (isDebug) bodyResp.debug = { code, rpc, details, hint, constraint }
+      return res.status(500).json(bodyResp)
     }
-    return res.status(400).json({ error: error.message || 'No fue posible crear la minuta.' })
+
+    const bodyResp: any = { error: error.message || 'No fue posible crear la minuta.' }
+    if (isDebug) bodyResp.debug = { code, rpc, details, hint, constraint }
+    return res.status(400).json(bodyResp)
   }
 
   // 5) OK
