@@ -33,27 +33,36 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (!user)   return res.status(401).json({ error: 'No authenticated user' })
 
   // 2) Tomar payload del cuerpo
-  const { date, description, task_done, notes } = (req.body ?? {}) as {
+  const { date, description, task_done, notes, work_type, is_protected } = (req.body ?? {}) as {
     date?: string | null
     description: string
     task_done?: string | null
     notes?: string | null
+    work_type?: string | null
+    is_protected?: boolean
   }
   if (!description?.trim()) return res.status(400).json({ error: 'description is required' })
 
-  // 3) Insertar con Service Role, PERO fijando user_id del usuario real
-  const { data, error } = await supabaseAdmin
-    .from('minute')
-    .insert([{
-      user_id: user.id,
-      date: date ?? null,
-      description,
-      task_done: task_done ?? null,
-      notes: notes ?? null,
-    }])
-    .select('id, folio, folio_serial')
-    .single()
+  // 3) Crear la minuta usando RPC segura (NO insert directo)
+  const { data, error } = await supabaseAdmin.rpc('create_minute_safe_v2', {
+    p_date: date ?? null,
+    p_description: description,
+    p_tarea: task_done ?? null,
+    p_novedades: notes ?? null,
+    p_work_type: work_type ?? null,
+    p_is_protected: typeof is_protected === 'boolean' ? is_protected : false,
+  })
 
-  if (error) return res.status(400).json({ error: error.message })
+  if (error) {
+    // Ajuste de errores conocidos
+    if (error.code === '23505') {
+      return res.status(409).json({ error: 'Se está asignando el número de minuta. Intenta nuevamente.' })
+    }
+    if (error.code === '42883') {
+      return res.status(500).json({ error: 'RPC create_minute_safe_v2 no encontrada. Aplica la migración en la BD.' })
+    }
+    return res.status(400).json({ error: error.message })
+  }
+
   return res.status(200).json({ ok: true, minute: data })
 }
