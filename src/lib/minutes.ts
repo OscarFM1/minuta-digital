@@ -3,10 +3,7 @@
  * Capa de acceso a datos para MINUTAS
  * ============================================================================
  * Cambios clave:
- * - `createMinute` llama EXCLUSIVAMENTE a `public.create_minute_safe_v2`
- *   (RPC sin sobrecarga ⇒ cero ambigüedad en PostgREST).
- * - Manejo claro de 23505 (concurrencia) y 42883 (RPC no encontrada).
- * - Cero inserts directos a `public.minute` para crear minutas.
+ * - `creat.
  */
 
 import { supabase } from '@/lib/supabaseClient'
@@ -103,7 +100,7 @@ async function getCurrentUserIdentity(): Promise<{ name: string | null; email: s
 /**
  * createMinute
  * ----------------------------------------------------------------------------
- * Crea una minuta vía RPC `public.create_minute_safe_v2` (sin sobrecargas).
+ * Crea una minuta vía **API interna** `/api/minutes/create` (service_role en servidor).
  * Tras crear:
  *  - Parche best-effort: `created_by_*`, `work_type`, `is_protected` si existen columnas.
  * Notas:
@@ -119,47 +116,47 @@ export async function createMinute(input: {
   description?: string | null
   work_type?: string | null
 }): Promise<Minute> {
-  await getCurrentUserId() // coherencia con RLS
+  await getCurrentUserId() // coherencia con RLS/estado de sesión en el cliente
 
   const { name, email } = await getCurrentUserIdentity()
   const safeDate = emptyToNull(input.date ?? null) || todayISO()
   const wt = normalizeWorkType(input.work_type ?? null)
 
-  // 1) Creación atómica por RPC v2 (nombre único, sin ambigüedad)
-  const { data, error } = await supabase.rpc('create_minute_safe_v2', {
-    p_date: safeDate,
-    p_description: emptyToNull(input.description ?? null),
-    p_tarea: emptyToNull(input.tarea_realizada ?? null),
-    p_novedades: emptyToNull(input.novedades ?? null),
-    p_work_type: wt,
-    p_is_protected: typeof input.is_protected === 'boolean' ? input.is_protected : false, // <-- CAMBIO: añadimos p_is_protected
+  // 1) Crear atómicamente via API (evita ambigüedad de PostgREST)
+  const resp = await fetch('/api/minutes/create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      date: safeDate,
+      description: emptyToNull(input.description ?? null) ?? '',
+      task_done: emptyToNull(input.tarea_realizada ?? null),
+      notes: emptyToNull(input.novedades ?? null),
+      work_type: wt,
+      is_protected: !!input.is_protected,
+    }),
   })
 
-  if (error) {
-    // 42883 => función no existe
-    if (error.code === '42883') {
-      throw new Error(
-        'RPC create_minute_safe_v2 no encontrada. Aplica la migración SQL que crea el wrapper v2 (sin sobrecargas).'
-      )
-    }
-    // 23505 => colisión por concurrencia (la RPC ya reintenta; UX clara)
-    if (error.code === '23505' || /reintentos/i.test(error.message || '')) {
-      throw new Error('Se está asignando el número de minuta. Intenta nuevamente.')
-    }
-    throw new Error(error?.message ?? 'No fue posible crear la minuta.')
+  let payload: { ok?: boolean; minute?: Minute; error?: string } = {}
+  try { payload = await resp.json() } catch { /* ignore */ }
+
+  if (!resp.ok || !payload.ok) {
+    // Mensajes ya normalizados desde la API
+    throw new Error(payload.error || 'No fue posible crear la minuta.')
   }
 
-  const row = data as Minute
+  const row = payload.minute as Minute
 
   // 2) Parche opcional (best-effort): nombre/email, work_type e is_protected
   try {
     const patch: Record<string, any> = {}
+
     if (name && (await hasColumn('created_by_name')))  patch.created_by_name  = name
     if (email && (await hasColumn('created_by_email'))) patch.created_by_email = email
     if (wt && (await hasWorkTypeColumn()))              patch.work_type        = wt
     if (typeof input.is_protected === 'boolean' && (await hasColumn('is_protected'))) {
       patch.is_protected = input.is_protected
     }
+
     if (Object.keys(patch).length > 0) {
       await supabase.from('minute').update(patch).eq('id', (row as any).id)
     }
