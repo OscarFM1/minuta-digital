@@ -2,7 +2,6 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
 import { serialize } from 'cookie'
 import { createServerClient } from '@supabase/ssr'
-import { supabaseAdmin } from '@/lib/supabaseAdmin'
 
 function cookieAdapter(req: NextApiRequest, res: NextApiResponse) {
   return {
@@ -21,7 +20,7 @@ function cookieAdapter(req: NextApiRequest, res: NextApiResponse) {
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  // 1) Leer usuario real desde cookie (JWT del navegador)
+  // 1) Cliente con sesión REAL del usuario (JWT en cookies)
   const s = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
@@ -32,7 +31,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   if (userErr) return res.status(401).json({ error: userErr.message })
   if (!user)   return res.status(401).json({ error: 'No authenticated user' })
 
-  // 2) Tomar payload del cuerpo
+  // 2) Payload
   const { date, description, task_done, notes, work_type, is_protected } = (req.body ?? {}) as {
     date?: string | null
     description: string
@@ -43,8 +42,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
   if (!description?.trim()) return res.status(400).json({ error: 'description is required' })
 
-  // 3) Crear la minuta usando RPC segura (NO insert directo)
-  const { data, error } = await supabaseAdmin.rpc('create_minute_safe_v2', {
+  // 3) Crear la minuta vía RPC SEGURA (usa auth.uid() del usuario)
+  const { data, error } = await s.rpc('create_minute_safe_v2', {
     p_date: date ?? null,
     p_description: description,
     p_tarea: task_done ?? null,
@@ -54,7 +53,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   })
 
   if (error) {
-    // Ajuste de errores conocidos
     if (error.code === '23505') {
       return res.status(409).json({ error: 'Se está asignando el número de minuta. Intenta nuevamente.' })
     }
@@ -64,5 +62,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(400).json({ error: error.message })
   }
 
+  // La RPC devuelve la fila completa de public.minute
   return res.status(200).json({ ok: true, minute: data })
 }
