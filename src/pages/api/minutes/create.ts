@@ -2,6 +2,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next'
 import { serialize } from 'cookie'
 import { createServerClient } from '@supabase/ssr'
+import { supabaseAdmin } from '@/lib/supabaseAdmin'
 
 function cookieAdapter(req: NextApiRequest, res: NextApiResponse) {
   return {
@@ -20,13 +21,12 @@ function cookieAdapter(req: NextApiRequest, res: NextApiResponse) {
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
-  // 1) Cliente con sesión REAL del usuario (JWT en cookies)
+  // 1) Obtener usuario real (para p_user_id)
   const s = createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     { cookies: cookieAdapter(req, res) },
   )
-
   const { data: { user }, error: userErr } = await s.auth.getUser()
   if (userErr) return res.status(401).json({ error: userErr.message })
   if (!user)   return res.status(401).json({ error: 'No authenticated user' })
@@ -42,14 +42,15 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   }
   if (!description?.trim()) return res.status(400).json({ error: 'description is required' })
 
-  // 3) Crear la minuta vía RPC SEGURA (usa auth.uid() del usuario)
-  const { data, error } = await s.rpc('create_minute_safe_v2', {
+  // 3) Crear por RPC v2 (service_role) fijando p_user_id explícitamente
+  const { data, error } = await supabaseAdmin.rpc('create_minute_safe_v2', {
     p_date: date ?? null,
     p_description: description,
     p_tarea: task_done ?? null,
     p_novedades: notes ?? null,
     p_work_type: work_type ?? null,
     p_is_protected: typeof is_protected === 'boolean' ? is_protected : false,
+    p_user_id: user.id, // <--- clave: evita 'No autenticado' en la función
   })
 
   if (error) {
@@ -62,6 +63,5 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(400).json({ error: error.message })
   }
 
-  // La RPC devuelve la fila completa de public.minute
   return res.status(200).json({ ok: true, minute: data })
 }
