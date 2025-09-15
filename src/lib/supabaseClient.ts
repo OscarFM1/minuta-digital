@@ -1,19 +1,26 @@
-// src/lib/supabaseClient.ts
+// /src/lib/supabaseClient.ts
 /**
- * Supabase Client (Next.js)
- * ------------------------------------------------------------------
- * - Crea y exporta un único cliente de Supabase para toda la app.
- * - En **desarrollo** expone `window.supabase` para depurar en consola.
- * - Mantiene sesión y refresco automático de tokens.
+ * Supabase Client (Next.js - CLIENTE / CSR)
+ * ============================================================================
+ * Propósito
+ * - Un único cliente de Supabase para el **navegador** con sesión persistente.
+ * - Auto-refresh de tokens y manejo del callback OAuth (detectSessionInUrl).
  *
- * Seguridad:
- * - NUNCA expone variables en producción.
- * - En dev puedes ejecutar en la consola del navegador:
- *     supabase.rpc('admin_list_minutes', { p_page: 1, p_page_size: 10 })
+ * Seguridad
+ * - SOLO usa variables públicas: NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY.
+ * - NO usar service_role aquí (nunca en el cliente).
+ *
+ * Depuración (solo DEV)
+ * - Expone `window.supabase` y logs mínimos con valores truncados.
+ *
+ * Notas
+ * - Este cliente NO debe usarse en SSR/API. Para servidor usa @supabase/ssr
+ *   (createServerClient/createMiddlewareClient) con manejo explícito de cookies.
  */
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 
+// ----------------------------- ENV obligatorias ------------------------------
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
 
@@ -23,15 +30,13 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   )
 }
 
-// Log mínimo (solo visible en el navegador/devtools del cliente)
-if (typeof window !== 'undefined' && process.env.NODE_ENV !== 'production') {
-  // Evita imprimir la key completa
-  // eslint-disable-next-line no-console
-  console.log('✅ Supabase URL:', SUPABASE_URL)
-  // eslint-disable-next-line no-console
-  console.log('✅ Supabase ANON key:', SUPABASE_ANON_KEY.slice(0, 10) + '…')
-}
-
+// ------------------------------ Cliente CSR ----------------------------------
+/**
+ * Cliente para el navegador.
+ * - persistSession: true → guarda tokens en localStorage.
+ * - autoRefreshToken: true → renueva tokens automáticamente.
+ * - detectSessionInUrl: true → captura el token del callback OAuth (si aplica).
+ */
 export const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
   auth: {
     persistSession: true,
@@ -40,19 +45,21 @@ export const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON
   },
 })
 
-/**
- * DEBUG: expone el cliente en `window.supabase` SOLO en desarrollo.
- * Esto te permite correr comandos desde la consola del navegador, por ejemplo:
- *   supabase.rpc('admin_list_minutes', { p_page: 1, p_page_size: 10 })
- */
+// ----------------------------- Depuración DEV --------------------------------
 declare global {
-  // Evita error TS al asignar a window
   interface Window {
     supabase?: SupabaseClient
   }
 }
 
 if (typeof window !== 'undefined' && process.env.NODE_ENV !== 'production') {
+  // Logs de verificación (no exponen la key completa en consola)
+  // eslint-disable-next-line no-console
+  console.log('✅ Supabase URL:', SUPABASE_URL)
+  // eslint-disable-next-line no-console
+  console.log('✅ Supabase ANON key:', SUPABASE_ANON_KEY.slice(0, 10) + '…')
+
+  // Exponer el cliente en la consola del navegador
   window.supabase = supabase
   // eslint-disable-next-line no-console
   console.log('🔎 window.supabase habilitado (solo DEV)')
