@@ -1,39 +1,18 @@
 // /src/pages/api/minutes/create.ts
 /**
- * API centralizada para crear MINUTAS
+ * Crear MINUTA vía RPC (API Route)
  * ============================================================================
- * - Obtiene el usuario real desde cookies (via createServerClient).
- * - Usa service_role solo para ejecutar la RPC, pero forzando p_user_id del usuario.
- * - Intenta primero minute_create_rpc; fallback a create_minute_safe_v2.
- * - Manejo de errores: 23505 (concurrencia), 42883 (función no encontrada),
- *   sobrecargas antiguas, etc.
+ * - Obtiene usuario real desde cookies con getServerSupabase(req,res).
+ * - Llama minute_create_rpc; fallback a create_minute_safe_v2 si 42883.
+ * - Maneja 23505 (concurrencia) y ambigüedades de sobrecargas.
+ * - SIN cookieAdapter casero → evita 401 por cookies con path incorrecto.
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next'
-import { serialize } from 'cookie'
-import { createServerClient } from '@supabase/ssr'
+import { getServerSupabase } from '@/lib/supabaseServer'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 
-// -----------------------------
-// Cookie adapter (para @supabase/ssr)
-// -----------------------------
-function cookieAdapter(req: NextApiRequest, res: NextApiResponse) {
-  return {
-    get(name: string) {
-      return req.cookies[name]
-    },
-    set(name: string, value: string, options: any) {
-      res.setHeader('Set-Cookie', serialize(name, value, options))
-    },
-    remove(name: string, options: any) {
-      res.setHeader('Set-Cookie', serialize(name, '', { ...options, maxAge: 0 }))
-    },
-  }
-}
-
-// -----------------------------
-// Helpers de normalización
-// -----------------------------
+// ----------------------------- Helpers ---------------------------------------
 const VALID_WORK_TYPES = new Set(['gran_formato', 'publicomercial', 'editorial', 'empaques'])
 
 function emptyToNull(v?: string | null) {
@@ -48,30 +27,22 @@ function normalizeWorkType(v?: string | null) {
   return VALID_WORK_TYPES.has(s) ? s : null
 }
 
-// -----------------------------
-// Handler principal
-// -----------------------------
+// ----------------------------- Handler ---------------------------------------
 export default async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST')
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  // 1) Usuario real (para p_user_id) desde cookies del navegador
-  const s = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    { cookies: cookieAdapter(req, res) },
-  )
+  // 1) Sesión (via cookies) con helper robusto
+  const s = getServerSupabase(req, res)
+  const { data: { user }, error: authErr } = await s.auth.getUser()
 
-  const { data: userData, error: userErr } = await s.auth.getUser()
-  const user = userData?.user
+  if (authErr) return res.status(401).json({ error: 'not_authenticated', detail: authErr.message })
+  if (!user)   return res.status(401).json({ error: 'not_authenticated', detail: 'No user in session' })
 
-  if (userErr) return res.status(401).json({ error: userErr.message })
-  if (!user) return res.status(401).json({ error: 'No authenticated user' })
-
-  // 2) Payload (normalizado)
-  const body = (req.body ?? {}) as {
+  // 2) Payload normalizado
+  const body = (typeof req.body === 'string' ? JSON.parse(req.body) : req.body) as {
     date?: string | null
     description?: string
     task_done?: string | null
@@ -80,10 +51,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     is_protected?: boolean
   }
 
-  const description = (body.description ?? '').trim()
-  if (!description) {
-    return res.status(400).json({ error: 'description is required' })
-  }
+  const description = (body?.description ?? '').trim()
+  if (!description) return res.status(400).json({ error: 'description is required' })
 
   const payload = {
     p_date: emptyToNull(body.date),
@@ -92,51 +61,37 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     p_novedades: emptyToNull(body.notes),
     p_work_type: normalizeWorkType(body.work_type),
     p_is_protected: !!body.is_protected,
-    p_user_id: user.id, // clave: asegura usuario aunque el JWT no llegue a PostgREST
+    p_user_id: user.id, // fuerza usuario real aunque RLS/jwt no lleguen a PostgREST
   }
 
-  // 3) Intento 1: wrapper limpio minute_create_rpc
-  let rpcName = 'minute_create_rpc'
-  let result = await supabaseAdmin.rpc(rpcName, payload as any)
+  // 3) RPC limpia → fallback
+  let rpc = 'minute_create_rpc'
+  let { data, error } = await supabaseAdmin.rpc(rpc, payload as any)
 
-  // 3.1) Fallback si la RPC no existe o el esquema está cacheado
-  if (
-    result.error &&
-    (result.error.code === '42883' ||
-      /not found|No function matches/i.test(result.error.message))
-  ) {
-    rpcName = 'create_minute_safe_v2'
-    result = await supabaseAdmin.rpc(rpcName, payload as any)
+  if (error && (error.code === '42883' || /No function matches|not found/i.test(error.message))) {
+    rpc = 'create_minute_safe_v2'
+    const r2 = await supabaseAdmin.rpc(rpc, payload as any)
+    data = r2.data; error = r2.error
   }
 
-  // 4) Manejo de errores
-  if (result.error) {
-    const err = result.error
-
-    if (err.code === '23505' || /reintentos/i.test(err.message)) {
-      return res.status(409).json({
-        error: 'Se está asignando el número de minuta. Intenta nuevamente.',
-      })
+  // 4) Errores mapeados
+  if (error) {
+    if (error.code === '23505' || /reintentos/i.test(error.message)) {
+      return res.status(409).json({ error: 'Se está asignando el número de minuta. Intenta nuevamente.' })
     }
-
-    if (err.code === '42883') {
+    if (error.code === '42883') {
       return res.status(500).json({
-        error: `RPC ${rpcName} no encontrada. Aplica la migración SQL y recarga el esquema (pg_notify 'pgrst','reload schema').`,
+        error: `RPC ${rpc} no encontrada. Aplica la migración SQL y recarga esquema (pg_notify 'pgrst','reload schema').`,
       })
     }
-
-    if (/Could not choose the best candidate function/i.test(err.message)) {
+    if (/Could not choose the best candidate function/i.test(error.message)) {
       return res.status(500).json({
-        error:
-          'RPC ambigua por sobrecargas antiguas. Elimina sobrecargas y deja una sola firma con p_user_id (7 args).',
+        error: 'RPC ambigua por sobrecargas antiguas. Deja una sola firma con p_user_id (7 args).',
       })
     }
-
-    return res
-      .status(400)
-      .json({ error: err.message || 'No fue posible crear la minuta.' })
+    return res.status(400).json({ error: error.message || 'No fue posible crear la minuta.' })
   }
 
   // 5) OK
-  return res.status(200).json({ ok: true, minute: result.data })
+  return res.status(200).json({ ok: true, minute: data })
 }
