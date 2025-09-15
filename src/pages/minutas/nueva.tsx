@@ -8,6 +8,7 @@
  * - ✅ Incluye checklist de comerciales (public.comerciales) y guarda en public.minuta_comercial.
  * - ✅ Reintento automático (23505/40001) al asignar número de minuta.
  * - ✅ ENVÍA Authorization: Bearer <token> al endpoint /api/minutes/create (fix 401).
+ * - ✅ (TEMP) Activa modo debug del API con header y query (?debug=1).
  */
 
 import { useEffect, useState } from 'react'
@@ -128,7 +129,7 @@ export default function NuevaMinutaPage() {
     })
   }
 
-  /** Llama al API /api/minutes/create con Authorization: Bearer <token> */
+  /** Llama al API /api/minutes/create con Authorization: Bearer <token> + DEBUG temporal */
   async function createMinuteViaApi(payload: {
     date?: string | null
     description: string | null
@@ -142,23 +143,34 @@ export default function NuevaMinutaPage() {
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (session?.access_token) {
-      headers.Authorization = `Bearer ${session.access_token}` // 👈 clave del fix 401
+      headers.Authorization = `Bearer ${session.access_token}` // 👈 fix 401
     }
+    headers['x-debug'] = '1' // DEBUG: activar modo debug del API (quitar al terminar)
 
-    const resp = await fetch('/api/minutes/create', {
+    const url = '/api/minutes/create?debug=1' // DEBUG: añade query para que el API incluya el bloque debug
+    const resp = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
     })
 
     if (!resp.ok) {
-      let detail = 'unknown_error'
-      try { detail = (await resp.json())?.error ?? detail } catch {}
+      // Intenta leer cuerpo con detalle (para ver el bloque debug)
+      let parsed: any = null
+      try { parsed = await resp.json() } catch {}
+      const detail = parsed?.error ?? 'unknown_error'
       const err = new Error(detail) as any
       if (resp.status === 409) err.code = '23505'
       if (resp.status === 401) err.message = 'not_authenticated'
+
+      // DEBUG: muestra respuesta completa en consola para copiar y pegar
+      if (parsed?.debug) {
+        // eslint-disable-next-line no-console
+        console.log('[DEBUG create] respuesta del API:', parsed)
+      }
       throw err
     }
+
     const { minute } = await resp.json()
     return minute as { id: string }
   }
