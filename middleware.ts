@@ -1,61 +1,49 @@
-// middleware.ts
-/**
- * Enforce de "primer login" a nivel SSR.
- * Lee la sesión desde cookies y si `first_login === true` fuerza redirección a /cambiar-password.
- * Respeta rutas públicas (login, cambiar-password, assets, API públicas).
- *
- * NOTA: coloca este archivo en la RAÍZ del proyecto.
- */
+// /middleware.ts
+import { NextResponse, type NextRequest } from 'next/server'
+import { createMiddlewareClient } from '@supabase/auth-helpers-nextjs'
 
-import { NextResponse } from 'next/server';
-import type { NextRequest } from 'next/server';
-import { createMiddlewareClient } from '@supabase/auth-helpers-nextjs';
-
-export async function middleware(req: NextRequest) {
-  const res = NextResponse.next();
-  const url = req.nextUrl;
-  const path = url.pathname;
-
-  // Instancia Supabase atada a req/res para refrescar sesión si aplica
-  const supabase = createMiddlewareClient({ req, res });
-  const { data: { session } } = await supabase.auth.getSession();
-
-  // 1) Rutas públicas: NO interceptar
-  const isPublic =
-    path.startsWith('/login') ||
-    path.startsWith('/cambiar-password') ||
-    path.startsWith('/_next') ||
-    path.startsWith('/favicon') ||
-    path.startsWith('/public') ||
-    path.startsWith('/api/hello') ||        // <- tus APIs "públicas" según capturas
-    path.startsWith('/api/invite');         // <- ajusta si debe ser pública
-
-  if (isPublic) return res;
-
-  // 2) Rutas que requieren sesión (según tu árbol: /mis-minutas, /minutas, /admin)
-  const requiresAuth =
-    path.startsWith('/mis-minutas') ||
-    path.startsWith('/minutas') ||
-    path.startsWith('/admin');
-
-  if (requiresAuth && !session) {
-    const redirect = new URL('/login', req.url);
-    redirect.searchParams.set('go', path + url.search);
-    return NextResponse.redirect(redirect);
-  }
-
-  // 3) En primer ingreso -> forzar cambio de contraseña
-  const firstLogin = session?.user?.user_metadata?.first_login === true;
-  if (firstLogin && !path.startsWith('/cambiar-password')) {
-    const redirect = new URL('/cambiar-password', req.url);
-    redirect.searchParams.set('go', path + url.search);
-    return NextResponse.redirect(redirect);
-  }
-
-  return res;
+function isTrue(v: any): boolean {
+  return v === true || v === 'true' || v === 1 || v === '1'
+}
+function isPublicPath(p: string) {
+  return p.startsWith('/login') ||
+    p.startsWith('/cambiar-password') ||
+    p.startsWith('/api/hello') ||
+    p.startsWith('/api/invite')
+}
+function requiresAuth(p: string) {
+  return p.startsWith('/mis-minutas') || p.startsWith('/minutas') || p.startsWith('/admin')
 }
 
-// Evita interceptar archivos estáticos
+export async function middleware(req: NextRequest) {
+  if (req.method === 'OPTIONS') return NextResponse.next()
+
+  const res = NextResponse.next()
+  const supabase = createMiddlewareClient({ req, res })
+  const { data: { session } } = await supabase.auth.getSession()
+
+  const path = req.nextUrl.pathname
+  if (isPublicPath(path)) return res
+
+  if (requiresAuth(path) && !session) {
+    const to = new URL('/login', req.url)
+    to.searchParams.set('go', path + req.nextUrl.search)
+    return NextResponse.redirect(to)
+  }
+
+  if (session) {
+    const firstLogin = isTrue(session.user?.user_metadata?.first_login)
+    if (firstLogin && !path.startsWith('/cambiar-password')) {
+      const to = new URL('/cambiar-password', req.url)
+      to.searchParams.set('go', path + req.nextUrl.search)
+      return NextResponse.redirect(to)
+    }
+  }
+  return res
+}
+
 export const config = {
-  matcher: ['/((?!.*\\.(?:ico|png|jpg|jpeg|svg|webp|gif)|_next/|favicon|public/).*)'],
-};
+  matcher: [
+    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)',
+  ],
+}
