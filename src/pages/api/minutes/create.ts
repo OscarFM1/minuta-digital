@@ -1,27 +1,13 @@
 // /src/pages/api/minutes/create.ts
-/**
- * Crear MINUTA vía RPC (API Route)
- * ============================================================================
- * - Obtiene usuario real desde cookies con getServerSupabase(req,res).
- * - Llama minute_create_rpc; fallback a create_minute_safe_v2 si 42883.
- * - Maneja 23505 (concurrencia) y ambigüedades de sobrecargas.
- * - SIN cookieAdapter casero → evita 401 por cookies con path incorrecto.
- */
-
 import type { NextApiRequest, NextApiResponse } from 'next'
 import { getServerSupabase } from '@/lib/supabaseServer'
+import { createClient } from '@supabase/supabase-js'
 import { supabaseAdmin } from '@/lib/supabaseAdmin'
 
 // ----------------------------- Helpers ---------------------------------------
 const VALID_WORK_TYPES = new Set(['gran_formato', 'publicomercial', 'editorial', 'empaques'])
-
-function emptyToNull(v?: string | null) {
-  if (v === undefined || v === null) return null
-  const s = String(v).trim()
-  return s === '' ? null : s
-}
-
-function normalizeWorkType(v?: string | null) {
+const emptyToNull = (v?: string | null) => (v == null || String(v).trim() === '' ? null : String(v).trim())
+const normalizeWorkType = (v?: string | null) => {
   if (!v) return null
   const s = String(v).trim().toLowerCase().replace(/\s+/g, '_')
   return VALID_WORK_TYPES.has(s) ? s : null
@@ -34,12 +20,29 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
-  // 1) Sesión (via cookies) con helper robusto
-  const s = getServerSupabase(req, res)
-  const { data: { user }, error: authErr } = await s.auth.getUser()
+  // 1) Resolver usuario por dos vías: Authorization header (preferida) o cookies
+  let userId: string | null = null
+  const auth = req.headers.authorization
+  if (auth && auth.startsWith('Bearer ')) {
+    // === Carril 1: token enviado por el cliente en el header ===
+    const accessToken = auth.slice(7)
+    const supaFromHeader = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      { global: { headers: { Authorization: `Bearer ${accessToken}` } } }
+    )
+    const { data, error } = await supaFromHeader.auth.getUser()
+    if (error) return res.status(401).json({ error: 'not_authenticated', detail: error.message })
+    userId = data.user?.id ?? null
+  } else {
+    // === Carril 2: cookies (como ya tenías) ===
+    const s = getServerSupabase(req, res)
+    const { data: { user }, error } = await s.auth.getUser()
+    if (error) return res.status(401).json({ error: 'not_authenticated', detail: error.message })
+    userId = user?.id ?? null
+  }
 
-  if (authErr) return res.status(401).json({ error: 'not_authenticated', detail: authErr.message })
-  if (!user)   return res.status(401).json({ error: 'not_authenticated', detail: 'No user in session' })
+  if (!userId) return res.status(401).json({ error: 'not_authenticated', detail: 'No user in session' })
 
   // 2) Payload normalizado
   const body = (typeof req.body === 'string' ? JSON.parse(req.body) : req.body) as {
@@ -61,7 +64,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
     p_novedades: emptyToNull(body.notes),
     p_work_type: normalizeWorkType(body.work_type),
     p_is_protected: !!body.is_protected,
-    p_user_id: user.id, // fuerza usuario real aunque RLS/jwt no lleguen a PostgREST
+    p_user_id: userId,
   }
 
   // 3) RPC limpia → fallback

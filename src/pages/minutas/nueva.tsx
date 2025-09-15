@@ -7,13 +7,14 @@
  * - Tras guardar, redirige a /minutas/[id]#timer para usar exclusivamente Start/Stop.
  * - ✅ Incluye checklist de comerciales (public.comerciales) y guarda en public.minuta_comercial.
  * - ✅ Reintento automático (23505/40001) al asignar número de minuta.
+ * - ✅ ENVÍA Authorization: Bearer <token> al endpoint /api/minutes/create (fix 401).
  */
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/router'
 import Head from 'next/head'
 import { Form, Button, Card, Alert, Spinner, Row, Col } from 'react-bootstrap'
-import { createMinute } from '@/lib/minutes'
+// import { createMinute } from '@/lib/minutes'   // ⛔️ ya no lo usamos aquí
 import ui from '@/styles/NewMinute.module.css'
 import styles from '@/styles/Minutas.module.css'
 import { supabase } from '@/lib/supabaseClient'
@@ -127,6 +128,41 @@ export default function NuevaMinutaPage() {
     })
   }
 
+  /** Llama al API /api/minutes/create con Authorization: Bearer <token> */
+  async function createMinuteViaApi(payload: {
+    date?: string | null
+    description: string | null
+    task_done?: string | null
+    notes?: string | null
+    work_type?: string | null
+    is_protected?: boolean
+  }) {
+    const { data: { session }, error: sessErr } = await supabase.auth.getSession()
+    if (sessErr) throw new Error(sessErr.message)
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (session?.access_token) {
+      headers.Authorization = `Bearer ${session.access_token}` // 👈 clave del fix 401
+    }
+
+    const resp = await fetch('/api/minutes/create', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    })
+
+    if (!resp.ok) {
+      let detail = 'unknown_error'
+      try { detail = (await resp.json())?.error ?? detail } catch {}
+      const err = new Error(detail) as any
+      if (resp.status === 409) err.code = '23505'
+      if (resp.status === 401) err.message = 'not_authenticated'
+      throw err
+    }
+    const { minute } = await resp.json()
+    return minute as { id: string }
+  }
+
   // Submit controlado — SIN horas (las pone Start/Stop en el detalle)
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -139,13 +175,12 @@ export default function NuevaMinutaPage() {
       if (!ok) return
 
       // 1) Crea la minuta con reintento automático ante 23505/40001
-      const row = await withRetry(() => createMinute({
+      const row = await withRetry(() => createMinuteViaApi({
         date: todayISO,
-        start_time: null,
-        end_time: null,
         description: description || null,
-        tarea_realizada: tarea || null,
-        novedades: novedades || null,
+        task_done: tarea || null,
+        notes: novedades || null,
+        work_type: null,         // si tienes tipo de trabajo, colócalo aquí
         is_protected: false,
       }), 3, 250)
 
@@ -252,7 +287,7 @@ export default function NuevaMinutaPage() {
                   </Form.Group>
                 </Col>
 
-                {/* ✅ Checklist de comerciales (solo nombre, sin correo en el label) */}
+                {/* ✅ Checklist de comerciales */}
                 <Col md={12}>
                   <Form.Group controlId="comerciales">
                     <Form.Label>¿Para qué comercial(es) es esta actividad?</Form.Label>
@@ -278,8 +313,8 @@ export default function NuevaMinutaPage() {
                             key={c.email}
                             id={`com-${c.email}`}
                             type="checkbox"
-                            label={c.nombre}               // 👈 solo nombre
-                            title={c.email}                // (opcional) visible al pasar el mouse
+                            label={c.nombre}
+                            title={c.email}
                             checked={selectedEmails.includes(c.email)}
                             onChange={() => toggleEmail(c.email)}
                             className="mb-1"
@@ -313,11 +348,11 @@ export default function NuevaMinutaPage() {
           min-height: 38px;
           padding: 8px 12px;
           border-radius: 0.375rem;
-          background: #0c1626; /* consistente con el tema oscuro */
+          background: #0c1626;
           color: #fff;
           border: 1px solid rgba(255,255,255,0.1);
           user-select: none;
-          pointer-events: none; /* no clics ni foco */
+          pointer-events: none;
           font-variant-numeric: tabular-nums;
         }
       `}</style>
