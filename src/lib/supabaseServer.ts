@@ -1,8 +1,10 @@
 // /src/lib/supabaseServer.ts
 /**
- * Cliente de servidor (SSR/API)
- * - Lee y escribe cookies en req/res para que el server "vea" la sesión.
- * - Evita "Auth session missing!" al llamar supabase.auth.getUser() en server.
+ * Cliente de servidor Supabase (SSR/API) — DEFINITIVO
+ * -----------------------------------------------------------------------------
+ * - Usa @supabase/ssr → createServerClient
+ * - Lee/escribe cookies en req/res (Next.js API Route o GSSP).
+ * - Evita "Auth session missing!" cuando el server consulta la sesión.
  */
 import type { NextApiRequest, NextApiResponse } from 'next'
 import { createServerClient } from '@supabase/ssr'
@@ -18,11 +20,11 @@ export function getServerSupabase(req: NextApiRequest, res: NextApiResponse) {
         return req.cookies?.[name]
       },
       set(name: string, value: string, options: any) {
+        // Escribe Set-Cookie SIN sobreescribir las previas
         const cookie = serialize(name, value, {
           path: '/',
           httpOnly: true,
           sameSite: 'lax',
-          // Usa secure=true en producción (Vercel): Nextjs configura automáticamente en HTTPS
           secure: process.env.NODE_ENV === 'production',
           ...options,
         })
