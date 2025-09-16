@@ -1,27 +1,9 @@
 // src/pages/api/admin/password-reset.ts
 /**
- * Reset de contraseña (ADMIN) — Endpoint único (conservador)
+ * Reset de contraseña (ADMIN) — Endpoint conservador con control de require_change
  * -----------------------------------------------------------------------------
- * - CORS unificado con /lib/allowedOrigins (wildcards + fallback proto/host).
- * - Preflight OPTIONS → 204 con headers CORS.
- * - POST: { login?: string; email?: string; password?: string }
- *   - Acepta "login" o "email"; si no trae "@", usa @LOGIN_DOMAIN.
- *   - Busca usuario via Admin API (service_role).
- *   - Marca SOLO en `profiles.must_change_password = true` (fuente única).
- *   - Actualiza contraseña en Auth (NO toca app_metadata/user_metadata).
- *
- * NOTA DE SEGURIDAD:
- *   - Este endpoint es deliberadamente "no intrusivo":
- *     * No modifica triggers ni policies.
- *     * No escribe en app_metadata/user_metadata (evita "doble gate").
- *     * El upsert en profiles es minimalista y no pisa campos existentes.
- *
- * ENV requeridas:
- *   NEXT_PUBLIC_SUPABASE_URL
- *   SUPABASE_SERVICE_ROLE_KEY
- *   ALLOWED_ORIGINS="https://minuta-digital.vercel.app,*.vercel.app"
- *   (Opcional) INTERNAL_ADMIN_TOKEN  -> Authorization: Bearer <token>
- *   (Opcional) NEXT_PUBLIC_LOGIN_DOMAIN="login.local"
+ * + Soporta body.require_change (boolean), default = true.
+ *   Si es false, deja profiles.must_change_password = false (evita bucle).
  */
 
 import type { NextApiRequest, NextApiResponse } from 'next'
@@ -44,7 +26,6 @@ type Resp = Ok | Err
 export default async function handler(req: NextApiRequest, res: NextApiResponse<Resp>) {
   const cors = buildCorsHeadersFromReq(req)
 
-  // Preflight
   if (req.method === 'OPTIONS') {
     res.setHeader('Vary', cors['Vary'])
     if ((cors as any)['Access-Control-Allow-Origin']) {
@@ -59,12 +40,10 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
   if (req.method !== 'POST') {
     return res.status(405).json({ ok: false, error: 'Method Not Allowed' })
   }
-
   if (!URL || !SERVICE) {
     return res.status(500).json({ ok: false, error: 'Faltan credenciales de servidor' })
   }
 
-  // Enforce CORS (acepta Origin o proto+host)
   const resolved = resolveRequestOrigin(req)
   if (!isOriginAllowed(resolved)) {
     return res.status(403).json({
@@ -74,7 +53,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
     })
   }
 
-  // Headers CORS para el resto de la respuesta
   res.setHeader('Vary', cors['Vary'])
   res.setHeader('Access-Control-Allow-Origin', (cors as any)['Access-Control-Allow-Origin'] || resolved!)
   res.setHeader('Access-Control-Allow-Credentials', 'true')
@@ -83,7 +61,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
 
   try {
-    // (Opcional) token interno para endurecer el endpoint
     const expected = process.env.INTERNAL_ADMIN_TOKEN
     if (expected) {
       const auth = req.headers.authorization || ''
@@ -93,83 +70,56 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse<
       }
     }
 
-    // ---------- Parseo robusto del payload ----------
     let body: any = req.body ?? {}
-    if (typeof body === 'string') {
-      try { body = JSON.parse(body) } catch { /* puede venir form-encoded */ }
-    }
+    if (typeof body === 'string') { try { body = JSON.parse(body) } catch {} }
+
     const rawLogin: string =
       (typeof body.login === 'string' && body.login.trim()) ||
-      (typeof body.email === 'string' && body.email.trim()) ||
-      ''
+      (typeof body.email === 'string' && body.email.trim()) || ''
 
-    if (!rawLogin) {
-      return res.status(400).json({ ok: false, error: 'login requerido' })
-    }
+    if (!rawLogin) return res.status(400).json({ ok: false, error: 'login requerido' })
+
+    // **Nuevo**: permite controlar si se requiere cambio posterior (default true)
+    const requireChange: boolean = (typeof body.require_change === 'boolean') ? body.require_change : true
 
     const customPassword: string | undefined =
       (typeof body.password === 'string' && body.password.length > 0) ? body.password : undefined
 
-    // Normaliza a email
     const email = rawLogin.includes('@')
       ? rawLogin.toLowerCase()
       : `${rawLogin.toLowerCase()}@${LOGIN_DOMAIN}`
 
-    // ---------- Supabase Admin ----------
-    const admin = createClient(URL, SERVICE, {
-      auth: { persistSession: false, autoRefreshToken: false },
-    })
+    const admin = createClient(URL, SERVICE, { auth: { persistSession: false, autoRefreshToken: false } })
 
-    // Buscar usuario (escala pequeña)
     const { data: page1, error: listErr } = await admin.auth.admin.listUsers({ page: 1, perPage: 1000 })
     if (listErr) throw listErr
     const user = page1.users.find(u => (u.email || '').toLowerCase() === email)
-    if (!user) {
-      return res.status(404).json({ ok: false, error: `No existe ${email}` })
-    }
+    if (!user) return res.status(404).json({ ok: false, error: `No existe ${email}` })
 
-    // Contraseña temporal (si no viene una)
-    const temp =
-      customPassword ||
-      `Tmp-${Math.random().toString(36).slice(2, 8)}-${Math.random().toString(36).slice(2, 6)}!`
+    const temp = customPassword || `Tmp-${Math.random().toString(36).slice(2, 8)}-${Math.random().toString(36).slice(2, 6)}!`
 
-    // 1) Actualiza contraseña real en Auth
-    //    - NO escribir app_metadata / user_metadata (evita "doble gate")
     const { error: updErr } = await admin.auth.admin.updateUserById(user.id, { password: temp })
     if (updErr) throw updErr
 
-    // 2) Marca "must_change_password" SOLO en profiles (fuente única)
-    //    - UPSERT minimalista: si el profile ya existe, NO pisamos email/role/etc.
-    //      Estrategia:
-    //        * Intentamos UPDATE directo; si no existe fila (rowCount=0), hacemos INSERT.
-    //      Ventaja: cero riesgo de sobreescritura accidental.
+    // **Cambiado**: setear flag según requireChange
     const { error: updateErr } = await admin
       .from('profiles')
-      .update({ must_change_password: true, updated_at: new Date().toISOString() })
+      .update({ must_change_password: requireChange, updated_at: new Date().toISOString() })
       .eq('id', user.id)
     if (updateErr) throw updateErr
 
-    // Si no había fila en profiles (0 filas afectadas), insertamos nueva mínima
-    // NOTA: el SDK no retorna rowCount, así que hacemos un SELECT para verificar existencia.
     const { data: existing, error: selErr } = await admin
       .from('profiles')
       .select('id')
       .eq('id', user.id)
       .single()
 
-    if (selErr && selErr.code !== 'PGRST116') { // PGRST116 = no rows found (PostgREST)
-      throw selErr
-    }
+    if (selErr && selErr.code !== 'PGRST116') throw selErr
 
     if (!existing) {
       const { error: insertErr } = await admin
         .from('profiles')
-        .insert({
-          id: user.id,
-          email, // guardamos email inicial si no existía fila
-          must_change_password: true,
-          // NO establecemos `role` aquí para no interferir con tu bootstrap existente
-        })
+        .insert({ id: user.id, email, must_change_password: requireChange })
       if (insertErr) throw insertErr
     }
 

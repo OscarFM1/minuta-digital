@@ -70,3 +70,51 @@
 .k { color: var(--mdx-ink-muted); font-weight: 600; display: inline-flex; align-items: center; gap: 8px; }
 .v { color: var(--mdx-ink); font-weight: 500; }
 .muted { color: var(--mdx-ink-muted); }
+/* ====== Minute Detail: Resumen (título + descripción + tarea) ====== */
+.summaryBlock {
+  margin: 8px 0 14px;
+}
+.summaryTitle {
+  margin: 0 0 6px;
+  font-weight: 800;
+  font-size: 18px;
+  color: #fff;            /* tema oscuro */
+  letter-spacing: -0.01em;
+}
+.summaryLabel {
+  font-weight: 600;
+  color: rgba(255,255,255,.75);
+  margin-right: 6px;
+}
+.summaryText {
+  margin: 0 0 6px;
+  font-size: 15px;
+  color: rgba(255,255,255,.95);
+}
+
+/* ===== Resumen en HERO (contraste sobre degradado claro) ===== */
+.summaryBlock {
+  margin-top: 10px;
+}
+
+.summaryTitle {
+  font-weight: 800;
+  font-size: 20px;
+  line-height: 1.25;
+  color: #0b1020 !important; /* clave: oscuro para que no se pierda en el fondo claro */
+  margin: 2px 0 6px;
+}
+
+.summaryText {
+  margin: 0 0 4px;
+  color: #0b1020;            /* texto normal, buen contraste */
+  opacity: .92;
+}
+
+.summaryLabel {
+  display: inline-block;
+  min-width: 140px;          /* alinea visualmente el par Label-Valor */
+  font-weight: 700;
+  color: #0b1020;
+  margin-right: .5rem;
+}

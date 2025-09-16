@@ -125,10 +125,38 @@
   .title { font-size: 24px; }
 }
 
-
 .newMinuteTitle {
-  color: #f8fafc;      /* blanco casi puro, se ve bien sobre fondo oscuro */
+  color: #0b1020;
   font-weight: 800;
-  opacity: 1 !important;  /* por si algún wrapper baja la opacidad */
+  opacity: 1 !important;
   letter-spacing: -0.02em;
 }
+
+/* ====== Card: campos de contenido ====== */
+.fieldBlock { display: grid; gap: 10px; margin-top: 6px; }
+.field { display: grid; gap: 4px; }
+
+.fieldLabel {
+  font-size: 12px;
+  letter-spacing: .02em;
+  text-transform: uppercase;
+  color: rgba(0,0,0,.55);
+}
+
+.titleValue {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: #0b0f1a;
+  word-break: break-word;
+}
+
+.taskValue {
+  font-size: 14px;
+  line-height: 1.4;
+  color: #222;
+  opacity: .9;
+  word-break: break-word;
+}
+
+.muted { color: #666; }
