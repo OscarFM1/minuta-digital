@@ -15,6 +15,7 @@ export type MinuteCardData = {
   start_time?: string | null
   end_time?: string | null
   description?: string | null
+  tarea_realizada?: string | null  // ✅ Añadido
   notes?: string | null
   adjuntos?: number
   user_name?: string
@@ -71,17 +72,11 @@ export default function MinuteCard({
   const countAdj = typeof minuta.adjuntos === 'number' ? minuta.adjuntos : 0
 
   const titleText = safe(
-    minuta.description ??
-    (minuta as any)?.title ??
-    (minuta as any)?.tarea_realizada ??
-    (minuta as any)?.task_done
+    minuta.description ?? minuta.tarea_realizada ?? (minuta as any)?.title
   )
 
   const taskText = safe(
-    (minuta as any)?.tarea_realizada ??
-    (minuta as any)?.task_done ??
-    minuta.notes ??
-    (minuta as any)?.novedades
+    minuta.tarea_realizada ?? minuta.notes ?? (minuta as any)?.novedades
   )
 
   const { display: folioText } = resolveFolio(minuta as any)
