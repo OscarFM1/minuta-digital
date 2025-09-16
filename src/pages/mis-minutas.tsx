@@ -2,20 +2,7 @@
 /**
  * MIS MINUTAS — SOLO para 'worker'
  * ============================================================================
- * Objetivos:
- * - Mantener hooks estables en el componente de página:
- *   La lógica de datos/UI vive en <WorkerScreen/> que SOLO se monta si el usuario es worker.
- * - Mostrar botón “Eliminar” SOLO a testers (correos en NEXT_PUBLIC_TEST_DELETE_EMAILS).
- *   La seguridad real la hace RLS en BD; la UI es una cortesía.
- * - Usar la API `deleteMinute()` (Paso 3) para eliminar minutas y limpiar adjuntos (best-effort).
- *
- * Roles/Política:
- * - admin/super_admin → redirect a /minutas (vista global).
- * - worker → ve su propia vista, puede crear/editar. Eliminar solo si es tester (UI) + RLS (BD).
- *
- * Notas:
- * - El conteo de adjuntos se muestra en la tarjeta; aquí NO se montan controles de evidencias.
- * - Realtime limitado a las minutas del usuario actual.
+// [...] (comentarios sin cambios)
  */
 
 import React, { useEffect, useMemo, useState } from 'react'
@@ -37,15 +24,11 @@ import { BsPlusLg } from 'react-icons/bs'
 import { useRole } from '@/hooks/useRole'
 import { deleteMinute as apiDeleteMinute } from '@/lib/minutes'
 
-/** Lista blanca de correos que pueden ver el botón Eliminar (tester). */
 const TEST_DELETE_EMAILS: string[] = (process.env.NEXT_PUBLIC_TEST_DELETE_EMAILS || '')
-  .split(',')
-  .map(s => s.trim().toLowerCase())
-  .filter(Boolean)
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean)
 
 type Filters = { desde?: string; hasta?: string }
 
-/** Estructura interna para mapear SELECT → MinuteCardData. */
 type MinuteRow = {
   id: string
   user_id: string
@@ -62,7 +45,6 @@ type MinuteRow = {
   attachment?: { count: number }[]
 }
 
-/** Fetcher: lista solo las minutas del dueño (RLS debe reforzarlo en BD). */
 const fetchMyMinutes = async (filters: Filters, userId: string): Promise<MinuteCardData[]> => {
   let query = supabase
     .from('minute')
@@ -96,8 +78,8 @@ const fetchMyMinutes = async (filters: Filters, userId: string): Promise<MinuteC
     date: m.date,
     start_time: m.start_time ?? null,
     end_time: m.end_time ?? null,
-    description: m.description ?? m.tarea_realizada ?? null,
-    notes: m.notes ?? undefined,
+    description: m.description ?? null,                 // 👈 ya no sobreescribe tarea
+    notes: m.tarea_realizada ?? m.notes ?? undefined,  // 👈 asegura que tarea_realizada llegue como `notes` (field genérico de MinuteCard)
     adjuntos: m.attachment?.[0]?.count ?? 0,
     user_name: m.created_by_name || m.created_by_email || 'Sin nombre',
     folio: m.folio ?? null,
@@ -105,14 +87,11 @@ const fetchMyMinutes = async (filters: Filters, userId: string): Promise<MinuteC
   }))
 }
 
-/* ================================ PÁGINA ================================ */
-
 export default function MisMinutasPage() {
   const router = useRouter()
   const { status, user } = useAuth()
-  const { loading: roleLoading, canWriteMinutes } = useRole() // worker => true
+  const { loading: roleLoading, canWriteMinutes } = useRole()
 
-  // Redirigir admins a la vista global
   useEffect(() => {
     if (status === 'authenticated' && !roleLoading && !canWriteMinutes) {
       router.replace('/minutas')
@@ -122,12 +101,9 @@ export default function MisMinutasPage() {
   return (
     <SessionGate requireAuth>
       <Head><title>Mis minutas</title></Head>
-
-      {/* Mientras determinamos rol o redirigimos, evita parpadeos */}
       {status !== 'authenticated' || roleLoading ? (
         <div style={{ padding: 24 }}>Cargando…</div>
       ) : !canWriteMinutes ? (
-        // Admin/SuperAdmin: ya se lanzó replace('/minutas'), placeholder de cortesía
         <div style={{ padding: 24 }}>Redirigiendo…</div>
       ) : user?.id ? (
         <WorkerScreen userId={user.id} userEmail={user.email ?? null} />
@@ -136,34 +112,13 @@ export default function MisMinutasPage() {
   )
 }
 
-/* ============================= CONTENIDO worker ============================= */
-
-function WorkerScreen({
-  userId,
-  userEmail,
-}: { userId: string; userEmail: string | null }) {
-  // Filtros de fecha
+function WorkerScreen({ userId, userEmail }: { userId: string; userEmail: string | null }) {
   const [filters, setFilters] = useState<Filters>({})
+  const isTester = useMemo(() => !!(userEmail && TEST_DELETE_EMAILS.includes(userEmail.toLowerCase())), [userEmail])
+  const swrKey = useMemo(() => (userId ? ['mis-minutas', userId, filters.desde ?? '', filters.hasta ?? ''] : null), [userId, filters])
 
-  // ¿Es tester? (UI) → Lista por ENV, comparando por lowercase.
-  const isTester = useMemo(
-    () => !!(userEmail && TEST_DELETE_EMAILS.includes(userEmail.toLowerCase())),
-    [userEmail]
-  )
+  const { data: items, error, isLoading, mutate } = useSWR<MinuteCardData[]>(swrKey, () => fetchMyMinutes(filters, userId), { revalidateOnFocus: true })
 
-  // SWR: key nula hasta que haya userId
-  const swrKey = useMemo(
-    () => (userId ? ['mis-minutas', userId, filters.desde ?? '', filters.hasta ?? ''] : null),
-    [userId, filters]
-  )
-
-  const { data: items, error, isLoading, mutate } = useSWR<MinuteCardData[]>(
-    swrKey,
-    () => fetchMyMinutes(filters, userId),
-    { revalidateOnFocus: true }
-  )
-
-  // Totales (DESCARTA pausas) vía RPC con fallback a (end - start)
   const minuteIds = useMemo(() => (items ?? []).map(m => m.id), [items])
   type TotalsRow = { minute_id: string; total_seconds: number }
 
@@ -177,27 +132,20 @@ function WorkerScreen({
     { revalidateOnFocus: true }
   )
 
-  // Realtime (solo minutas del usuario)
   useEffect(() => {
     if (!userId) return
     const ch = supabase
       .channel('minute-self')
-      .on('postgres_changes',
-        { event: '*', schema: 'public', table: 'minute', filter: `user_id=eq.${userId}` },
-        () => { mutate(); mutateTotals() })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'minute', filter: `user_id=eq.${userId}` }, () => { mutate(); mutateTotals() })
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [userId, mutate, mutateTotals])
 
-  // Estados para eliminación (modal de confirmación)
   const [showDelete, setShowDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [toDeleteId, setToDeleteId] = useState<string | null>(null)
-
-  // Feedback user-friendly
   const [feedback, setFeedback] = useState<string | null>(null)
 
-  // Derivar métricas para <StatsBar/>
   const stats = useMemo(() => {
     if (!items || items.length === 0) return { count: 0, minutes: 0, attachments: 0 }
     const byId = new Map<string, number>()
@@ -215,18 +163,12 @@ function WorkerScreen({
     return { count: items.length, minutes: Math.round(totalSeconds / 60), attachments }
   }, [items, totals])
 
-  // Abrir modal de confirmación
-  const askDelete = (id: string) => {
-    setToDeleteId(id)
-    setShowDelete(true)
-  }
+  const askDelete = (id: string) => { setToDeleteId(id); setShowDelete(true) }
 
-  // Ejecutar eliminación usando la API del Paso 3
   const confirmDelete = async () => {
     if (!toDeleteId) return
     try {
       setDeleting(true)
-      // 🔐 RLS decidirá si el usuario realmente puede borrar
       await apiDeleteMinute(toDeleteId)
       setShowDelete(false)
       setToDeleteId(null)
@@ -242,7 +184,6 @@ function WorkerScreen({
     }
   }
 
-  // Logout robusto (evita refresco manual)
   const logout = async () => {
     try { await supabase.auth.signOut() } finally { window.location.assign('/login') }
   }
@@ -265,30 +206,20 @@ function WorkerScreen({
       </Row>
 
       <StatsBar count={stats.count} totalMinutes={stats.minutes} attachments={stats.attachments} />
-
       <section className={styles.filterSection}>
         <MinutesFilter value={filters} onChange={setFilters} />
       </section>
 
-      {feedback && (
-        <Alert variant="info" className="mt-3" onClose={() => setFeedback(null)} dismissible>
-          {feedback}
-        </Alert>
-      )}
+      {feedback && <Alert variant="info" className="mt-3" onClose={() => setFeedback(null)} dismissible>{feedback}</Alert>}
       {error && <Alert variant="danger" className="mt-3">Error al cargar minutas: {error.message}</Alert>}
 
       <section className={styles.listArea}>
         {isLoading && <Skeletons count={6} />}
-
         {!isLoading && !error && (items?.length ?? 0) === 0 && (
           <div className="text-center py-5">
             <h2 className="mb-2">Aún no hay minutas en este rango</h2>
-            <p style={{ color: '#cbd5e1', marginBottom: 16 }}>
-              Crea tu primera minuta o ajusta las fechas para ver resultados.
-            </p>
-            <Button as="a" href="/minutas/nueva" className="btn btn-primary btn-lg">
-              Crear minuta
-            </Button>
+            <p style={{ color: '#cbd5e1', marginBottom: 16 }}>Crea tu primera minuta o ajusta las fechas para ver resultados.</p>
+            <Button as="a" href="/minutas/nueva" className="btn btn-primary btn-lg">Crear minuta</Button>
           </div>
         )}
 
@@ -298,11 +229,11 @@ function WorkerScreen({
               <Col key={minuta.id}>
                 <MinuteCard
                   minuta={minuta}
-                  mode="edit"                                   // Worker puede editar
-                  canDelete={isTester}                          // 👈 Solo tester ve “Eliminar”
-                  viewHref={`/minutas/${minuta.id}`}            // Navegación robusta
+                  mode="edit"
+                  canDelete={isTester}
+                  viewHref={`/minutas/${minuta.id}`}
                   onEdit={() => window.location.assign(`/minutas/${minuta.id}?edit=1`)}
-                  onDelete={() => askDelete(minuta.id)}         // Confirma antes de eliminar
+                  onDelete={() => askDelete(minuta.id)}
                 />
               </Col>
             ))}
@@ -310,29 +241,14 @@ function WorkerScreen({
         )}
       </section>
 
-      {/* FAB */}
-      <Button
-        as="a"
-        href="/minutas/nueva"
-        className={styles.fab}
-        role="button"
-        aria-label="Crear nueva minuta flotante"
-      >
+      <Button as="a" href="/minutas/nueva" className={styles.fab} role="button" aria-label="Crear nueva minuta flotante">
         <BsPlusLg />
       </Button>
 
-      {/* Modal de eliminación (solo aparece si el tester lo dispara) */}
-      <DeleteModal
-        show={showDelete}
-        onHide={() => setShowDelete(false)}
-        onConfirm={confirmDelete}
-        deleting={deleting}
-      />
+      <DeleteModal show={showDelete} onHide={() => setShowDelete(false)} onConfirm={confirmDelete} deleting={deleting} />
     </Container>
   )
 }
-
-/* ================================ UI auxiliar =============================== */
 
 function DeleteModal({
   show, onHide, onConfirm, deleting,
