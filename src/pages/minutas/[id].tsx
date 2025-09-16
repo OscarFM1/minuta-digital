@@ -6,6 +6,7 @@
  * - Gating por roles con useRole (admin/super_admin = solo lectura).
  * - Admin ve el "Creador" (creator_display) en HERO y tarjeta.
  * - Se muestra y mantiene en edición el "Tipo de trabajo" (work_type).
+ * - Resumen UX: Título (bold) + Descripción (novedades) + Tarea realizada.
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react'
@@ -25,18 +26,26 @@ import userUi from '@/styles/MinuteFormUser.module.css'
 import LockTareaRealizada from '@/components/LockTareaRealizada'
 import { getMinuteByIdWithCreator, type MinuteWithCreator } from '@/lib/minutes'
 import { useRole } from '@/hooks/useRole'
-import { WORK_TYPE_LABEL } from '@/types/minute' // 👈 labels amigables de work_type
+import { WORK_TYPE_LABEL } from '@/types/minute'
 
 type IntervalRow = {
   id: string
   minute_id: string
-  started_at: string // ISO
-  ended_at: string | null // ISO | null
+  started_at: string
+  ended_at: string | null
+}
+
+/** Extensión local del tipo para incluir campos opcionales usados en UI. */
+type MinuteForUI = MinuteWithCreator & {
+  description?: string | null
+  novedades?: string | null
+  tarea_realizada?: string | null
+  task_done?: string | null
+  work_type?: string | null
 }
 
 /* ==================== Utils ==================== */
 
-/** Normaliza a HH:mm tanto ‘HH:mm’, ‘HH:mm:ss’ como ISO. */
 function toHHMM(value?: string | null): string {
   if (!value) return ''
   const s = String(value).trim()
@@ -45,11 +54,8 @@ function toHHMM(value?: string | null): string {
   const d = dayjs(s)
   return d.isValid() ? d.format('HH:mm') : ''
 }
-
-/** Hora actual en formato compatible con PG TIME. */
 function nowAsPgTime(): string { return dayjs().format('HH:mm:ss') }
 
-/** Formato humano para segundos totales. */
 function fmtDurationFromSeconds(totalSecs: number): string {
   const secs = Math.max(0, Math.round(totalSecs))
   const h = Math.floor(secs / 3600)
@@ -60,10 +66,10 @@ function fmtDurationFromSeconds(totalSecs: number): string {
   return `${s}s`
 }
 
-/** Fallback para mostrar tarea: prioriza `tarea_realizada` y cae a `description`. */
-function tareaFrom(row?: MinuteWithCreator | null): string {
+/** Prioriza `tarea_realizada`. */
+function tareaFrom(row?: MinuteForUI | null): string {
   if (!row) return ''
-  return (row.tarea_realizada ?? (row as any).description ?? '') as string
+  return (row.tarea_realizada ?? '') as string
 }
 
 /** Espeja al textarea interno del MinuteForm para pasar validaciones. */
@@ -111,14 +117,17 @@ export default function MinuteDetailPage() {
   const { loading: roleLoading, canWriteMinutes } = useRole()
   const isAdminRole = !roleLoading && !canWriteMinutes
 
-  // ⬇️ Minuta con creator_display (usa tipo correcto en SWR)
+  // Minuta con creator_display
   const minuteKey = id && status === 'authenticated' ? (['minute-with-creator', id] as const) : null
-  const { data: minute, isLoading: isMinuteLoading, error: minuteError, mutate: mutateMinute } =
+  const { data: minuteRaw, isLoading: isMinuteLoading, error: minuteError, mutate: mutateMinute } =
     useSWR<MinuteWithCreator | null>(
       minuteKey,
       ([_tag, theId]) => getMinuteByIdWithCreator(String(theId)),
       { revalidateOnFocus: false }
     )
+
+  // Cast tipado seguro para UI
+  const minute = (minuteRaw ?? undefined) as MinuteForUI | undefined
 
   // Intervals
   const intervalsKey = id && status === 'authenticated' ? (['intervals', id] as const) : null
@@ -140,7 +149,7 @@ export default function MinuteDetailPage() {
   const totalSeconds = useMemo(() => sumIntervalsSeconds(intervals ?? []), [intervals])
   const durationHuman = fmtDurationFromSeconds(totalSeconds)
 
-  // Tarea realizada (igual que antes)
+  // Tarea realizada
   const tareaValueServer = useMemo(() => tareaFrom(minute), [minute])
   const [tareaText, setTareaText] = useState<string>('')
   const [saveState, setSaveState] = useState<'idle'|'saving'|'saved'|'error'>('idle')
@@ -155,7 +164,7 @@ export default function MinuteDetailPage() {
     setTareaLocked(false)
   }, [minute?.id, tareaValueServer])
 
-  // Fallback: ocultar inputs time del MinuteForm
+  // Ocultar inputs time del MinuteForm
   useEffect(() => {
     const scope = document.querySelector(`.${userUi.userFormScope}`)
     if (!scope) return
@@ -175,30 +184,17 @@ export default function MinuteDetailPage() {
   async function doRefresh() {
     await Promise.all([mutateIntervals(), mutateMinute()])
   }
-
   function nowIso() { return new Date().toISOString() }
 
   async function handleStartOrResume(kind: 'start' | 'resume') {
     if (!id || !isOwner || hasEnded || opLoading) return
     setOpErr(null); setOpLoading(kind)
     try {
-      await supabase
-        .from('minute_interval')
-        .update({ ended_at: nowIso() })
-        .eq('minute_id', id)
-        .is('ended_at', null)
-
-      const ins = await supabase
-        .from('minute_interval')
-        .insert({ minute_id: id })
-        .select('id')
-        .single()
-
+      await supabase.from('minute_interval').update({ ended_at: nowIso() }).eq('minute_id', id).is('ended_at', null)
+      const ins = await supabase.from('minute_interval').insert({ minute_id: id }).select('id').single()
       if (ins.error && ins.error.code !== '23505') throw ins.error
       if (!minute?.start_time) {
-        await supabase.from('minute')
-          .update({ start_time: nowAsPgTime(), end_time: null })
-          .eq('id', id)
+        await supabase.from('minute').update({ start_time: nowAsPgTime(), end_time: null }).eq('id', id)
       }
       await doRefresh()
     } catch (e: any) {
@@ -207,16 +203,11 @@ export default function MinuteDetailPage() {
       setOpLoading(null)
     }
   }
-
   async function handlePause() {
     if (!id || !isOwner || !isRunning || opLoading) return
     setOpErr(null); setOpLoading('pause')
     try {
-      const { error } = await supabase
-        .from('minute_interval')
-        .update({ ended_at: nowIso() })
-        .eq('minute_id', id)
-        .is('ended_at', null)
+      const { error } = await supabase.from('minute_interval').update({ ended_at: nowIso() }).eq('minute_id', id).is('ended_at', null)
       if (error) throw error
       await doRefresh()
     } catch (e: any) {
@@ -225,31 +216,17 @@ export default function MinuteDetailPage() {
       setOpLoading(null)
     }
   }
-
   async function handleStop() {
     if (!id || !isOwner || hasEnded || opLoading) return
     setOpErr(null); setOpLoading('stop')
     try {
-      await supabase
-        .from('minute_interval')
-        .update({ ended_at: nowIso() })
-        .eq('minute_id', id)
-        .is('ended_at', null)
-
-      const { error: updErr } = await supabase
-        .from('minute')
-        .update({ end_time: nowAsPgTime() })
-        .eq('id', id)
+      await supabase.from('minute_interval').update({ ended_at: nowIso() }).eq('minute_id', id).is('ended_at', null)
+      const { error: updErr } = await supabase.from('minute').update({ end_time: nowAsPgTime() }).eq('id', id)
       if (updErr) throw updErr
-
       await doRefresh()
-
       window.setTimeout(() => {
-        const el = document.querySelector<HTMLElement>(
-          'textarea[name="tareaRealizada"], textarea[name="tarea_realizada"]'
-        )
-        el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-        el?.focus()
+        const el = document.querySelector<HTMLElement>('textarea[name="tareaRealizada"], textarea[name="tarea_realizada"]')
+        el?.scrollIntoView({ behavior: 'smooth', block: 'center' }); el?.focus()
       }, 120)
     } catch (e: any) {
       setOpErr(e?.message || 'No se pudo detener.')
@@ -258,20 +235,13 @@ export default function MinuteDetailPage() {
     }
   }
 
-  // Guardado “tarea realizada” (debounce)
+  // Guardado “tarea realizada” (debounce) — ya NO toca description
   async function persistTarea(text: string) {
     if (!id) return
-    const { error } = await supabase
-      .from('minute')
-      .update({ tarea_realizada: text, description: text })
-      .eq('id', id)
+    const { error } = await supabase.from('minute').update({ tarea_realizada: text }).eq('id', id)
     if (error) throw error
-    await mutateMinute(
-      (curr) => (curr ? ({ ...curr, tarea_realizada: text } as MinuteWithCreator) : curr),
-      { revalidate: false }
-    )
+    await mutateMinute((curr) => (curr ? ({ ...(curr as MinuteForUI), tarea_realizada: text } as MinuteForUI) : curr), { revalidate: false })
   }
-
   function scheduleSave(text: string, delay = 800) {
     if (tareaLocked) return
     setSaveState('saving')
@@ -290,10 +260,7 @@ export default function MinuteDetailPage() {
     scheduleSave(v)
   }
   async function onTareaBlur() {
-    if (saveTimer.current) {
-      window.clearTimeout(saveTimer.current)
-      saveTimer.current = null
-    }
+    if (saveTimer.current) { window.clearTimeout(saveTimer.current); saveTimer.current = null }
     if (!tareaLocked && saveState === 'saving') {
       try { await persistTarea(tareaText); setSaveState('saved') } catch { setSaveState('error') }
     }
@@ -302,29 +269,21 @@ export default function MinuteDetailPage() {
 
   // Render de estados iniciales/errores
   if (!id) {
-    return (
-      <SessionGate requireAuth>
-        <Container className="py-4"><Alert variant="warning">ID de minuta no especificado.</Alert></Container>
-      </SessionGate>
-    )
+    return (<SessionGate requireAuth><Container className="py-4"><Alert variant="warning">ID de minuta no especificado.</Alert></Container></SessionGate>)
   }
   if (minuteError || intervalsError) {
-    return (
-      <SessionGate requireAuth>
-        <Container className="py-4"><Alert variant="danger">No se pudo cargar la minuta: {String((minuteError as any)?.message || minuteError || intervalsError)}</Alert></Container>
-      </SessionGate>
-    )
+    return (<SessionGate requireAuth><Container className="py-4"><Alert variant="danger">No se pudo cargar la minuta: {String((minuteError as any)?.message || minuteError || intervalsError)}</Alert></Container></SessionGate>)
   }
 
   const { display: folioText } = resolveFolio({
     id: minute?.id ?? '',
-    folio: (minute as any)?.folio,
-    folio_serial: (minute as any)?.folio_serial,
+    folio: minute?.folio as any,
+    folio_serial: minute?.folio_serial as any,
   })
   const dateStr = minute?.date ? dayjs(minute.date).format('DD/MM/YYYY') : '—'
   const timeStr = `${toHHMM(minute?.start_time) || '—'} — ${toHHMM(minute?.end_time) || '—'}`
 
-  // 🔒 Sólo el dueño y que además sea worker (no admin) puede editar
+  // 🔒 Solo dueño y worker (no admin) puede editar
   const showOwnerEdit = !!minute && !!userId && minute.user_id === userId && !isAdminRole
   const canEditTarea = showOwnerEdit && !!minute?.end_time && !tareaLocked
 
@@ -336,11 +295,18 @@ export default function MinuteDetailPage() {
         ? { text: 'En pausa', variant: 'info' as const }
         : { text: 'Sin iniciar', variant: 'secondary' as const }
 
+  // ===== Datos de resumen UX (usando MinuteForUI) =====
+  const titleText = (minute?.description ?? '').toString().trim()
+  const notesText = (minute?.novedades ?? '').toString().trim()
+  const taskText = (minute?.tarea_realizada ?? minute?.task_done ?? '').toString().trim()
+
   return (
     <SessionGate requireAuth>
       <Container className={ui.wrapper}>
         {(status === 'loading' || isMinuteLoading || isIntervalsLoading || roleLoading) && (
-          <div className="py-4 d-flex align-items-center gap-2"><Spinner animation="border" size="sm" /><span>Cargando…</span></div>
+          <div className="py-4 d-flex align-items-center gap-2">
+            <Spinner animation="border" size="sm" /><span>Cargando…</span>
+          </div>
         )}
 
         {minute && (
@@ -362,14 +328,31 @@ export default function MinuteDetailPage() {
                 <div className={ui.meta}>
                   <span className={ui.metaItem}><FiCalendar /> {dateStr}</span>
                   <span className={ui.metaItem}><FiClock /> {timeStr}</span>
-
-                  {/* ADMIN/SUPER_ADMIN: mostrar Creador resuelto */}
                   {isAdminRole && (
                     <span className={ui.metaItem} title="Creador de la minuta">
                       <FiUser /> {minute.creator_display ?? '—'}
                     </span>
                   )}
                 </div>
+
+                {/* ====== RESUMEN UX ====== */}
+                <section className={ui.summaryBlock} aria-label="Resumen de la minuta">
+                  <h3 className={ui.summaryTitle}>{titleText || 'Sin título'}</h3>
+
+                  {notesText && (
+                    <p className={ui.summaryText}>
+                      <span className={ui.summaryLabel}>Descripción:</span>
+                      {notesText}
+                    </p>
+                  )}
+
+                  {taskText && (
+                    <p className={ui.summaryText}>
+                      <span className={ui.summaryLabel}>Tarea realizada:</span>
+                      {taskText}
+                    </p>
+                  )}
+                </section>
               </div>
             </div>
 
@@ -380,9 +363,7 @@ export default function MinuteDetailPage() {
                 <Card className={ui.card} id="timer" aria-label="Cronómetro">
                   <Card.Header className={ui.cardHeader}>
                     <span>Tiempo</span>
-                    <Badge bg={statusBadge.variant} className={ui.badgePill}>
-                      {statusBadge.text}
-                    </Badge>
+                    <Badge bg={statusBadge.variant} className={ui.badgePill}>{statusBadge.text}</Badge>
                   </Card.Header>
                   <Card.Body className="d-flex flex-column gap-2">
                     <div className="d-flex align-items-center gap-3">
@@ -390,7 +371,6 @@ export default function MinuteDetailPage() {
                       <div className="text-muted small">({timeStr})</div>
                     </div>
 
-                    {/* Controles del tiempo */}
                     {showOwnerEdit ? (
                       <div className="d-flex flex-wrap gap-2">
                         {!hasStarted && !hasEnded && (
@@ -398,19 +378,16 @@ export default function MinuteDetailPage() {
                             {opLoading === 'start' ? <Spinner animation="border" size="sm" /> : <><FiPlay /> Start</>}
                           </Button>
                         )}
-
                         {isRunning && !hasEnded && (
                           <Button variant="warning" onClick={handlePause} disabled={opLoading !== null}>
                             {opLoading === 'pause' ? <Spinner animation="border" size="sm" /> : <><FiPause /> Pause</>}
                           </Button>
                         )}
-
                         {isPaused && !hasEnded && (
                           <Button variant="success" onClick={() => handleStartOrResume('resume')} disabled={opLoading !== null}>
                             {opLoading === 'resume' ? <Spinner animation="border" size="sm" /> : <><FiRotateCw /> Resume</>}
                           </Button>
                         )}
-
                         {hasStarted && !hasEnded && (
                           <Button variant="danger" onClick={handleStop} disabled={opLoading !== null}>
                             {opLoading === 'stop' ? <Spinner animation="border" size="sm" /> : <><FiSquare /> Stop</>}
@@ -434,10 +411,9 @@ export default function MinuteDetailPage() {
 
                   {showOwnerEdit ? (
                     <Card.Body className={`${userUi.userFormScope} ${minute.end_time ? userUi.unlockTarea : ''}`}>
-                      {/* Lock visual del campo interno */}
                       <LockTareaRealizada />
 
-                      {/* Editor propio (mínimo ruido; bloqueo tras guardar final) */}
+                      {/* Editor propio de tarea (bloqueado hasta finalizar) */}
                       {(!tareaLocked && !!minute.end_time) && (
                         <div className="mb-3">
                           <label className="form-label">Tarea realizada</label>
@@ -459,7 +435,7 @@ export default function MinuteDetailPage() {
                         </div>
                       )}
 
-                      {/* MinuteForm para resto de campos (oculto tarea/horas) */}
+                      {/* MinuteForm (ocultamos tarea/horas) */}
                       <div className="mm-hide-tarea mm-hide-hours">
                         <MinuteForm
                           mode="edit"
@@ -470,19 +446,15 @@ export default function MinuteDetailPage() {
                           autosaveDelayMs={800}
                           initialValues={{
                             tarea_realizada: tareaValueServer,
-                            novedades: (minute as any).novedades ?? '',
+                            novedades: minute?.novedades ?? '',
                           }}
-                          initialWorkType={(minute as any).work_type ?? null}   // 👈 PASAMOS EL TIPO AQUÍ
+                          initialWorkType={minute?.work_type ?? null}
                           ignoreTareaValidation={true}
                           tareaMirrorValue={tareaText}
-                          onSaved={async () => {
-                            // Refresca los datos en pantalla
-                            await mutateMinute(undefined, { revalidate: true })
-                          }}
+                          onSaved={async () => { await mutateMinute(undefined, { revalidate: true }) }}
                         />
                       </div>
 
-                      {/* CSS local para ocultar el campo duplicado del MinuteForm y horas */}
                       <style jsx>{`
                         .mm-hide-tarea :global(label[for="tarea"]),
                         .mm-hide-tarea :global(#tarea) { display: none !important; }
@@ -499,7 +471,6 @@ export default function MinuteDetailPage() {
                         <div className={ui.k}><FiClock /> Horario</div>
                         <div className={ui.v}>{timeStr}</div>
 
-                        {/* ADMIN/SUPER_ADMIN: mostrar creador también en la tarjeta */}
                         {isAdminRole && (
                           <>
                             <div className={ui.k}><FiUser /> Creador</div>
@@ -507,18 +478,18 @@ export default function MinuteDetailPage() {
                           </>
                         )}
 
-                        {/* Tipo de trabajo (label amigable) */}
                         <div className={ui.k}>Tipo de trabajo</div>
                         <div className={ui.v}>
-                          {(minute as any)?.work_type
-                            ? WORK_TYPE_LABEL[(minute as any).work_type as keyof typeof WORK_TYPE_LABEL]
+                          {minute?.work_type
+                            ? WORK_TYPE_LABEL[minute.work_type as keyof typeof WORK_TYPE_LABEL]
                             : <span className={ui.muted}>—</span>}
                         </div>
 
                         <div className={ui.k}>Tarea realizada</div>
                         <div className={ui.v}>{tareaValueServer || <span className={ui.muted}>—</span>}</div>
+
                         <div className={ui.k}>Novedades</div>
-                        <div className={ui.v}>{(minute as any).novedades || <span className={ui.muted}>—</span>}</div>
+                        <div className={ui.v}>{minute?.novedades || <span className={ui.muted}>—</span>}</div>
                       </div>
                     </Card.Body>
                   )}
