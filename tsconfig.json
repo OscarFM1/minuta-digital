@@ -23,6 +23,6 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", "scripts/set-password.mjs"],
   "exclude": ["node_modules"]
 }
