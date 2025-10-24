@@ -36,23 +36,36 @@ export type MinuteRow = {
   start_time: string | null
   end_time: string | null
   /** Duración efectiva por fila (segundos) con fallback a date + time. */
-  duration_effective_seconds: number
+  duration_effective_seconds: number | string
   description: string | null
   tarea_realizada: string | null
   /** Repetidos en cada fila para el set actual (consumir solo de la primera). */
-  total_rows: number
-  total_seconds: number
+  total_rows: number | string
+  total_seconds: number | string
 }
 
-/**
- * Convierte segundos a minutos enteros, sin decimales.
- * Protege contra valores undefined/NaN (retorna 0).
- */
-function secondsToMinutes(seconds: unknown): number {
-  const n = typeof seconds === 'number' ? seconds : Number(seconds ?? 0)
-  if (!Number.isFinite(n) || n <= 0) return 0
-  return Math.floor(n / 60)
+/* ============================
+ * Utilidades numéricas seguras
+ * ============================ */
+
+/** Convierte unknown a entero seguro >= 0. Si falla, retorna 0. */
+function toSafeInt(n: unknown): number {
+  if (typeof n === 'number') return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
+  if (typeof n === 'string') {
+    const v = Number(n)
+    return Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0
+  }
+  return 0
 }
+
+/** Convierte segundos a minutos enteros (floor). */
+function secondsToMinutes(seconds: unknown): number {
+  return Math.floor(toSafeInt(seconds) / 60)
+}
+
+/* ============================
+ * RPC recomendada (lista + totales unificados)
+ * ============================ */
 
 /**
  * 🔵 RECOMENDADO: Lista + totales del mismo conjunto en una sola llamada.
@@ -82,12 +95,24 @@ export async function getMyMinutesPage(params?: {
   if (error) throw error
 
   const items = (data ?? []) as MinuteRow[]
-  const total = Number(items[0]?.total_rows ?? 0)
-  const totalSeconds = Number(items[0]?.total_seconds ?? 0)
+
+  // OJO: PostgREST puede devolver total_rows/total_seconds como string => normalizamos
+  const total = toSafeInt(items[0]?.total_rows ?? 0)
+  const totalSeconds = toSafeInt(items[0]?.total_seconds ?? 0)
   const totalMinutes = secondsToMinutes(totalSeconds)
+
+  // También normalizamos por fila la duración efectiva (útil si la usas en las cards)
+  for (const it of items) {
+    
+    it.duration_effective_seconds = toSafeInt(it.duration_effective_seconds)
+  }
 
   return { items, total, totalMinutes }
 }
+
+/* ============================
+ * Compatibilidad (stats antiguas)
+ * ============================ */
 
 /**
  * 🟠 Compatibilidad: estadísticas antiguas basadas en `my_minutes_stats`.
@@ -107,18 +132,22 @@ export async function getMyMinutesStats(params?: {
   })
   if (error) throw error
 
-  const total = Number((data as any)?.total ?? 0)
-  const totalSeconds = Number((data as any)?.total_seconds ?? 0)
+  const total = toSafeInt((data as any)?.total ?? 0)
+  const totalSeconds = toSafeInt((data as any)?.total_seconds ?? 0)
 
   return {
-    total: Number.isFinite(total) ? total : 0,
+    total,
     totalMinutes: secondsToMinutes(totalSeconds),
   }
 }
 
+/* ============================
+ * Utilidad de diagnóstico por mes
+ * ============================ */
+
 /**
- * Utilidad: devuelve el primer y último día (YYYY-MM-DD) a partir de 'YYYY-MM'.
- * Maneja años bisiestos y meses de 28/29/30/31 días.
+ * Consulta ad-hoc por mes. Mantén esto solo para diagnósticos o reportes.
+ * Para la pantalla "Mis minutas" usa SIEMPRE getMyMinutesPage().
  */
 function monthEdgeDates(monthISO: string): { from: string; to: string } {
   const [yStr, mStr] = monthISO.split('-')
@@ -138,8 +167,7 @@ function monthEdgeDates(monthISO: string): { from: string; to: string } {
 }
 
 /**
- * Consulta ad-hoc por mes. Mantén esto solo para diagnósticos o reportes.
- * Para la pantalla "Mis minutas" usa SIEMPRE getMyMinutesPage().
+ * Consulta ad-hoc por mes (diagnóstico). No usar para la pantalla principal.
  */
 export async function listMinutesByMonth(monthISO: string) {
   const { from, to } = monthEdgeDates(monthISO)
