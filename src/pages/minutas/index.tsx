@@ -7,6 +7,13 @@
  * - Realtime: refresca al cambiar 'minute'.
  * - Listado con MinuteCard en mode="read" (evidencias en RO).
  * - Bloque "Reset de contraseña (ADMIN)" (usa /api/admin/password-reset).
+ *
+ * NOTAS DE INGENIERÍA
+ * - Esta vista es GLOBAL (admin); por eso aquí se consulta directamente la tabla
+ *   `public.minute` y NO la RPC `my_minutes_page` (que filtra por auth.uid()).
+ * - Si más adelante quieres “totales + lista” del mismo conjunto para admin,
+ *   crea una RPC `admin_minutes_page(p_from,p_to,p_user,p_limit,p_offset)` con
+ *   SECURITY DEFINER y aplica el mismo patrón de “page” (lista + totales).
  */
 
 import React, { useEffect, useState } from 'react'
@@ -26,50 +33,99 @@ import RequireRole from '@/components/RequireRole'
 type Filters = { desde?: string; hasta?: string; user?: string }
 type UserOption = { value: string; label: string }
 
-/* =============================== Fetchers ================================ */
+/* =============================================================================
+ * Fetchers
+ * ========================================================================== */
+
+/**
+ * Trae minutas globales para admin con filtros de rango y usuario.
+ *
+ * Diseño:
+ * - Orden estable: primero por `date` DESC, luego `started_at` DESC, luego `start_time` DESC.
+ *   Esto evita “saltos” por registros sin `started_at` (históricos) y deja un orden
+ *   consistente entre datos antiguos y nuevos.
+ * - Adjuntos: usamos `attachment(count)` y blindamos lectura ante estructuras nulas.
+ * - Atajo: incluimos `started_at`/`ended_at` en select para futuras métricas o
+ *   para renderizar duración por fila si lo necesitas después.
+ */
 async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
-  const col = 'date'
+  const dateCol = 'date'
+
+  // Base query
   let q = supabase
     .from('minute')
     .select(`
-      id, date, start_time, end_time, description, tarea_realizada,
-      created_by_name, created_by_email, folio, folio_serial, attachment(count)
+      id,
+      ${dateCol},
+      start_time,
+      end_time,
+      started_at,
+      ended_at,
+      description,
+      tarea_realizada,
+      created_by_name,
+      created_by_email,
+      folio,
+      folio_serial,
+      attachment(count)
     `)
-    .order(col, { ascending: false })
-    .order('start_time', { ascending: false })
+    // Orden estable para todo tipo de registros
+    .order(dateCol, { ascending: false })
+    .order('started_at', { ascending: false, nullsFirst: false })
+    .order('start_time', { ascending: false, nullsFirst: false })
 
-  if (filters.desde) q = q.gte(col, filters.desde)
-  if (filters.hasta) q = q.lte(col, filters.hasta)
+  // Filtros por rango de fechas (inclusive)
+  if (filters.desde) q = q.gte(dateCol, filters.desde)
+  if (filters.hasta) q = q.lte(dateCol, filters.hasta)
+
+  // Filtro por usuario (nombre o correo, ilike) – robusto contra espacios
   if (filters.user?.trim()) {
-    const term = filters.user.trim()
+    const term = filters.user.trim().replace(/\s+/g, ' ')
+    // Usamos OR para buscar tanto en name como en email.
     q = q.or(`created_by_name.ilike.%${term}%,created_by_email.ilike.%${term}%`)
   }
 
   const { data, error } = await q
   if (error) throw error
 
-  return (data ?? []).map((m: any) => ({
-    id: m.id,
-    date: m.date,
-    start_time: m.start_time,
-    end_time: m.end_time,
-    description: m.description ?? m.tarea_realizada ?? null,
-    adjuntos: m?.attachment?.[0]?.count ?? 0,
-    user_name: m.created_by_name || m.created_by_email || 'Sin nombre',
-    folio: m.folio ?? null,
-    folio_serial: typeof m.folio_serial === 'number' ? m.folio_serial : null,
-  }))
+  // Mapeo a MinuteCardData (componente existente)
+  return (data ?? []).map((m: any) => {
+    const attachmentsCount =
+      (Array.isArray(m?.attachment) && m.attachment[0]?.count != null)
+        ? Number(m.attachment[0].count)
+        : 0
+
+    return {
+      id: m.id as string,
+      date: m.date as string,
+      start_time: m.start_time ?? null,
+      end_time: m.end_time ?? null,
+      // Si tu MinuteCard usa `description` para el título, prioriza description y
+      // usa tarea_realizada como respaldo.
+      description: (m.description as string) ?? (m.tarea_realizada as string) ?? null,
+      adjuntos: attachmentsCount,
+      user_name: (m.created_by_name as string) || (m.created_by_email as string) || 'Sin nombre',
+      folio: (m.folio as string) ?? null,
+      folio_serial: typeof m.folio_serial === 'number' ? m.folio_serial : null,
+    } as MinuteCardData
+  })
 }
 
+/**
+ * Lista las opciones de usuario (nombre/correo) para el datalist de búsqueda.
+ * - Deduplica por email/nombre (normalizados a lower-case).
+ */
 async function fetchUserOptions(): Promise<UserOption[]> {
   const { data, error } = await supabase
     .from('minute')
     .select('created_by_name, created_by_email')
     .order('created_by_name', { ascending: true })
+
   if (error) throw error
 
   const seen = new Set<string>()
   const out: UserOption[] = []
+
   for (const row of (data ?? [])) {
     const email = (row as any).created_by_email as string | null
     const name  = (row as any).created_by_name  as string | null
@@ -81,10 +137,14 @@ async function fetchUserOptions(): Promise<UserOption[]> {
     const label = email && name ? `${name} <${email}>` : (email || name!)!
     out.push({ value, label })
   }
+
   return out
 }
 
-/* ============================== Page Wrapper ============================= */
+/* =============================================================================
+ * Page Wrapper
+ * ========================================================================== */
+
 export default function MinutasGlobalPage() {
   return (
     <>
@@ -96,7 +156,10 @@ export default function MinutasGlobalPage() {
   )
 }
 
-/* ============================ AdminMinutasView =========================== */
+/* =============================================================================
+ * AdminMinutasView
+ * ========================================================================== */
+
 function AdminMinutasView() {
   useFirstLoginGate()
   const router = useRouter()
@@ -104,10 +167,20 @@ function AdminMinutasView() {
   const [filters, setFilters] = useState<Filters>({})
   const [forceKey, setForceKey] = useState<number>(0)
 
+  /**
+   * SWR: usamos una key compuesta para que revalide al cambiar cualquier filtro
+   * o al forzar un refresh (forceKey).
+   */
   const { data: items, error, isLoading, mutate } = useSWR<MinuteCardData[]>(
     ['admin-minutes', filters, forceKey],
     () => fetchMinutes(filters),
-    { revalidateIfStale: true, revalidateOnFocus: false, revalidateOnReconnect: true, keepPreviousData: false, dedupingInterval: 0 }
+    {
+      revalidateIfStale: true,
+      revalidateOnFocus: false,
+      revalidateOnReconnect: true,
+      keepPreviousData: false,
+      dedupingInterval: 0,
+    }
   )
 
   const { data: userOptions } = useSWR<UserOption[]>(
@@ -116,6 +189,7 @@ function AdminMinutasView() {
     { revalidateOnFocus: false }
   )
 
+  // Realtime: refrescamos la lista ante cualquier cambio en 'minute'
   useEffect(() => {
     const ch = supabase
       .channel('minute-admin')
@@ -124,9 +198,13 @@ function AdminMinutasView() {
     return () => { supabase.removeChannel(ch) }
   }, [mutate])
 
+  // Navegación a detalle
   const onView = (id: string) => { void router.push(`/minutas/${id}`) }
+
+  // Refresh manual (además de SWR)
   const handleHardRefresh = () => { setForceKey(Date.now()); void mutate() }
 
+  // Handlers de filtros
   const handleUser  = (e: React.ChangeEvent<HTMLInputElement>) => setFilters(f => ({ ...f, user:  e.target.value || undefined }))
   const handleDesde = (e: React.ChangeEvent<HTMLInputElement>) => setFilters(f => ({ ...f, desde: e.target.value || undefined }))
   const handleHasta = (e: React.ChangeEvent<HTMLInputElement>) => setFilters(f => ({ ...f, hasta: e.target.value || undefined }))
