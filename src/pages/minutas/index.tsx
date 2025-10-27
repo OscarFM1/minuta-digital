@@ -1,27 +1,16 @@
-// PR: ui-only marker (admin minutas)
-// PR: ui-only marker (admin minutas) — safe to remove after merge
 // src/pages/minutas/index.tsx
 /**
  * /minutas — Vista GLOBAL para ADMIN / SUPER_ADMIN (solo lectura)
  * -----------------------------------------------------------------------------
- * - Gating por rol con <RequireRole allow={['admin','super_admin']}>.
  * - Filtros: usuario (datalist por RPC) + rango de fechas.
- * - Realtime: refresca al cambiar 'minute'.
- * - Listado con MinuteCard en mode="read" (evidencias en RO).
- *
- * Backend:
- * - admin_minutes_page(p_from_date, p_to_date, p_user_id, p_tz, p_limit, p_offset)
- *   => { items jsonb[], total_rows bigint, total_seconds bigint }
- * - admin_minute_user_options(p_from_date, p_to_date, p_tz, p_limit)
- *   => opciones para el datalist (user_id, created_by_name, created_by_email, minutes_count)
+ * - Realtime por tabla 'minute'.
+ * - Backend: admin_minutes_page + admin_minute_user_options (RPCs).
  */
 
 import React, { useEffect, useState } from 'react';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
-import {
-  Container, Row, Col, Button, Form, InputGroup, Accordion,
-} from 'react-bootstrap';
+import { Container, Row, Col, Button, Form, InputGroup, Accordion } from 'react-bootstrap';
 import useSWR from 'swr';
 import { supabase } from '@/lib/supabaseClient';
 import MinuteCard, { MinuteCardData } from '@/components/MinuteCard';
@@ -29,6 +18,17 @@ import styles from '@/styles/Minutas.module.css';
 import { useFirstLoginGate } from '@/hooks/useFirstLoginGate';
 import AdminResetPassword from '@/components/AdminResetPassword';
 import RequireRole from '@/components/RequireRole';
+
+/* ============================================================================
+ * Utilidades de fecha (evitar NULL en RPCs)
+ * ========================================================================== */
+const toISODate = (d: Date) => d.toISOString().slice(0, 10);
+const today = () => new Date();
+const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
+
+// Rango por defecto: últimos 30 días
+const DEFAULT_FROM = toISODate(daysAgo(30));
+const DEFAULT_TO   = toISODate(today());
 
 type Filters = { desde?: string; hasta?: string; userId?: string | null; userQuery?: string };
 type UserOption = { value: string; label: string };
@@ -56,26 +56,21 @@ type RpcAdminItem = {
  * ========================================================================== */
 
 /**
- * ✅ Admin (GLOBAL): lista paginada via RPC + mapeo a MinuteCardData.
- * IMPORTANTE: la RPC devuelve { items, total_rows, total_seconds }.
+ * Admin (GLOBAL): lista paginada via RPC + mapeo a MinuteCardData.
+ * La RPC devuelve { items, total_rows, total_seconds }.
+ * Nunca enviar NULL en fechas → usar DEFAULT_FROM/DEFAULT_TO.
  */
 async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
-  const p_from_date = filters.desde ?? null; // 'YYYY-MM-DD' o null
-  const p_to_date   = filters.hasta ?? null;
-  const p_user_id   = filters.userId ?? null; // si no tienes el UUID, pasa null
+  const p_from_date = (filters.desde && filters.desde.length) ? filters.desde : DEFAULT_FROM;
+  const p_to_date   = (filters.hasta && filters.hasta.length) ? filters.hasta : DEFAULT_TO;
+  const p_user_id   = filters.userId ?? null;
   const p_tz        = 'America/Bogota';
 
   const { data, error } = await supabase.rpc('admin_minutes_page', {
-    p_from_date,
-    p_to_date,
-    p_user_id,
-    p_tz,
-    p_limit: 200,
-    p_offset: 0,
+    p_from_date, p_to_date, p_user_id, p_tz, p_limit: 200, p_offset: 0,
   });
 
   if (error) {
-    // Log útil para backend
     // eslint-disable-next-line no-console
     console.error('[admin_minutes_page] error', error);
     throw new Error(error.message);
@@ -97,19 +92,16 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
 }
 
 /**
- * ✅ Opciones de usuario para el datalist (sin tocar la tabla minute directamente).
- * Usa la RPC admin_minute_user_options para evitar ambigüedades/ordenamientos.
+ * Opciones de usuario para el datalist (RPC; evita tocar tabla directamente).
+ * También usa rango por defecto para no enviar NULL.
  */
 async function fetchUserOptions(from?: string, to?: string): Promise<UserOption[]> {
-  const p_from_date = from ?? null;
-  const p_to_date   = to ?? null;
+  const p_from_date = (from && from.length) ? from : DEFAULT_FROM;
+  const p_to_date   = (to && to.length) ? to   : DEFAULT_TO;
   const p_tz        = 'America/Bogota';
 
   const { data, error } = await supabase.rpc('admin_minute_user_options', {
-    p_from_date,
-    p_to_date,
-    p_tz,
-    p_limit: 100,
+    p_from_date, p_to_date, p_tz, p_limit: 100,
   });
 
   if (error) {
@@ -124,7 +116,7 @@ async function fetchUserOptions(from?: string, to?: string): Promise<UserOption[
     const email = r.created_by_email?.trim();
     const name  = r.created_by_name?.trim();
     const label = email && name ? `${name} <${email}>` : (email || name || '');
-    const value = r.user_id; // value será el UUID; más estable para filtrar
+    const value = r.user_id; // usamos UUID como value
     if (!value || !label) continue;
     if (seen.has(value)) continue;
     seen.add(value);
@@ -156,15 +148,17 @@ function AdminMinutasView() {
   useFirstLoginGate();
   const router = useRouter();
 
-  const [filters, setFilters] = useState<Filters>({});
+  // Filtros con valores por defecto (últimos 30 días)
+  const [filters, setFilters] = useState<Filters>({
+    desde: DEFAULT_FROM,
+    hasta: DEFAULT_TO,
+    userId: null,
+  });
   const [forceKey, setForceKey] = useState<number>(0);
 
-  /**
-   * SWR: key serializable (fechas + userId + forceKey).
-   * Nota: enviamos userId (UUID) — si el usuario escribe texto libre, guárdalo en userQuery.
-   */
+  // SWR: key serializable (fechas + userId + forceKey)
   const { data: items, error, isLoading, mutate } = useSWR<MinuteCardData[]>(
-    ['admin-minutes', filters.desde ?? '', filters.hasta ?? '', filters.userId ?? '', forceKey],
+    ['admin-minutes', filters.desde ?? DEFAULT_FROM, filters.hasta ?? DEFAULT_TO, filters.userId ?? '', forceKey],
     () => fetchMinutes(filters),
     {
       revalidateIfStale: true,
@@ -176,12 +170,12 @@ function AdminMinutasView() {
   );
 
   const { data: userOptions } = useSWR<UserOption[]>(
-    ['admin-minute-users', filters.desde ?? '', filters.hasta ?? ''],
+    ['admin-minute-users', filters.desde ?? DEFAULT_FROM, filters.hasta ?? DEFAULT_TO],
     () => fetchUserOptions(filters.desde, filters.hasta),
     { revalidateOnFocus: false }
   );
 
-  // Realtime: refrescamos la lista ante cualquier cambio en 'minute'
+  // Realtime: refrescar lista ante cualquier cambio en 'minute'
   useEffect(() => {
     const ch = supabase
       .channel('minute-admin')
@@ -193,21 +187,20 @@ function AdminMinutasView() {
   // Navegación a detalle
   const onView = (id: string) => { void router.push(`/minutas/${id}`); };
 
-  // Refresh manual (además de SWR)
+  // Refresh manual
   const handleHardRefresh = () => { setForceKey(Date.now()); void mutate(); };
 
   // Handlers de filtros
   const handleUser = (e: React.ChangeEvent<HTMLInputElement>) => {
-    // value es el user_id (UUID) porque usamos <option value={uuid} />
     const value = e.target.value || '';
     setFilters((f) => ({ ...f, userId: value || null }));
   };
   const handleDesde = (e: React.ChangeEvent<HTMLInputElement>) =>
-    setFilters((f) => ({ ...f, desde: e.target.value || undefined }));
+    setFilters((f) => ({ ...f, desde: e.target.value || DEFAULT_FROM }));
   const handleHasta = (e: React.ChangeEvent<HTMLInputElement>) =>
-    setFilters((f) => ({ ...f, hasta: e.target.value || undefined }));
+    setFilters((f) => ({ ...f, hasta: e.target.value || DEFAULT_TO }));
 
-  const clearFilters = () => setFilters({});
+  const clearFilters = () => setFilters({ desde: DEFAULT_FROM, hasta: DEFAULT_TO, userId: null });
 
   return (
     <Container fluid className={styles.bg}>
@@ -220,7 +213,6 @@ function AdminMinutasView() {
           <Button variant="outline-secondary" onClick={handleHardRefresh}>
             Actualizar
           </Button>
-          {/* 🔒 Navegación DURA: página /logout cierra sesión y redirige */}
           <Button as="a" href="/logout" variant="outline-secondary">
             Cerrar sesión
           </Button>
@@ -263,12 +255,12 @@ function AdminMinutasView() {
 
         <Col md={3} lg={3}>
           <Form.Label>Desde</Form.Label>
-          <Form.Control type="date" value={filters.desde ?? ''} onChange={handleDesde} />
+          <Form.Control type="date" value={filters.desde ?? DEFAULT_FROM} onChange={handleDesde} />
         </Col>
 
         <Col md={3} lg={3}>
           <Form.Label>Hasta</Form.Label>
-          <Form.Control type="date" value={filters.hasta ?? ''} onChange={handleHasta} />
+          <Form.Control type="date" value={filters.hasta ?? DEFAULT_TO} onChange={handleHasta} />
         </Col>
 
         <Col md={1} lg={2} className="d-flex">
