@@ -9,11 +9,11 @@
  * - Bloque "Reset de contraseña (ADMIN)" (usa /api/admin/password-reset).
  *
  * NOTAS DE INGENIERÍA
- * - Esta vista es GLOBAL (admin); por eso aquí se consulta directamente la tabla
- *   `public.minute` y NO la RPC `my_minutes_page` (que filtra por auth.uid()).
- * - Si más adelante quieres “totales + lista” del mismo conjunto para admin,
- *   crea una RPC `admin_minutes_page(p_from,p_to,p_user,p_limit,p_offset)` con
- *   SECURITY DEFINER y aplica el mismo patrón de “page” (lista + totales).
+ * - Esta vista es GLOBAL (admin); aquí usamos una RPC específica:
+ *   `admin_minutes_page(p_from, p_to, p_user, p_limit, p_offset)` con SECURITY DEFINER,
+ *   que devuelve: lista de minutas + conteo de adjuntos + totales del set.
+ * - Evitamos selects anidados tipo `attachment(count)` que en algunos contextos
+ *   pueden disparar recursión/stack depth por RLS/funciones dependientes.
  */
 
 import React, { useEffect, useState } from 'react'
@@ -33,82 +33,68 @@ import RequireRole from '@/components/RequireRole'
 type Filters = { desde?: string; hasta?: string; user?: string }
 type UserOption = { value: string; label: string }
 
+/**
+ * Filas que retorna la RPC admin_minutes_page.
+ * Incluye: datos de la minuta, conteo de adjuntos y totales del set (repetidos por fila).
+ */
+type AdminPageRow = {
+  id: string
+  date: string
+  start_time: string | null
+  end_time: string | null
+  started_at: string | null
+  ended_at: string | null
+  description: string | null
+  tarea_realizada: string | null
+  created_by_name: string | null
+  created_by_email: string | null
+  folio: string | null
+  folio_serial: number | null
+  att_count: number
+  total_rows: number | string
+  total_seconds: number | string
+}
+
 /* =============================================================================
  * Fetchers
  * ========================================================================== */
 
 /**
- * Trae minutas globales para admin con filtros de rango y usuario.
- *
- * Diseño:
- * - Orden estable: primero por `date` DESC, luego `started_at` DESC, luego `start_time` DESC.
- *   Esto evita “saltos” por registros sin `started_at` (históricos) y deja un orden
- *   consistente entre datos antiguos y nuevos.
- * - Adjuntos: usamos `attachment(count)` y blindamos lectura ante estructuras nulas.
- * - Atajo: incluimos `started_at`/`ended_at` en select para futuras métricas o
- *   para renderizar duración por fila si lo necesitas después.
+ * ✅ Admin (GLOBAL): lista + conteo de adjuntos + totales via RPC.
+ * - Evita selects anidados (no usamos `attachment(count)`).
+ * - Soporta filtros de rango y búsqueda por usuario (nombre o correo).
+ * - Si en el futuro quieres un StatsBar admin, puedes leer `rows[0].total_rows`
+ *   y `rows[0].total_seconds` aquí mismo y subirlo por estado/props.
  */
 async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
-  const dateCol = 'date'
+  const { desde, hasta } = filters
+  const user = filters.user?.trim() || null
 
-  // Base query
-  let q = supabase
-    .from('minute')
-    .select(`
-      id,
-      ${dateCol},
-      start_time,
-      end_time,
-      started_at,
-      ended_at,
-      description,
-      tarea_realizada,
-      created_by_name,
-      created_by_email,
-      folio,
-      folio_serial,
-      attachment(count)
-    `)
-    // Orden estable para todo tipo de registros
-    .order(dateCol, { ascending: false })
-    .order('started_at', { ascending: false, nullsFirst: false })
-    .order('start_time', { ascending: false, nullsFirst: false })
-
-  // Filtros por rango de fechas (inclusive)
-  if (filters.desde) q = q.gte(dateCol, filters.desde)
-  if (filters.hasta) q = q.lte(dateCol, filters.hasta)
-
-  // Filtro por usuario (nombre o correo, ilike) – robusto contra espacios
-  if (filters.user?.trim()) {
-    const term = filters.user.trim().replace(/\s+/g, ' ')
-    // Usamos OR para buscar tanto en name como en email.
-    q = q.or(`created_by_name.ilike.%${term}%,created_by_email.ilike.%${term}%`)
-  }
-
-  const { data, error } = await q
+  const { data, error } = await supabase.rpc('admin_minutes_page', {
+    p_from:  desde ?? null,
+    p_to:    hasta ?? null,
+    p_user:  user,
+    p_limit: 200,
+    p_offset: 0,
+  })
   if (error) throw error
 
-  // Mapeo a MinuteCardData (componente existente)
-  return (data ?? []).map((m: any) => {
-    const attachmentsCount =
-      (Array.isArray(m?.attachment) && m.attachment[0]?.count != null)
-        ? Number(m.attachment[0].count)
-        : 0
+  const rows = (data ?? []) as AdminPageRow[]
 
-    return {
-      id: m.id as string,
-      date: m.date as string,
-      start_time: m.start_time ?? null,
-      end_time: m.end_time ?? null,
-      // Si tu MinuteCard usa `description` para el título, prioriza description y
-      // usa tarea_realizada como respaldo.
-      description: (m.description as string) ?? (m.tarea_realizada as string) ?? null,
-      adjuntos: attachmentsCount,
-      user_name: (m.created_by_name as string) || (m.created_by_email as string) || 'Sin nombre',
-      folio: (m.folio as string) ?? null,
-      folio_serial: typeof m.folio_serial === 'number' ? m.folio_serial : null,
-    } as MinuteCardData
-  })
+  return rows.map(r => ({
+    id: r.id,
+    date: r.date,
+    start_time: r.start_time,
+    end_time: r.end_time,
+    // Title/desc: prioriza `description`, respaldo `tarea_realizada`
+    description: r.description ?? r.tarea_realizada ?? null,
+    // Conteo de adjuntos que viene calculado en la RPC
+    adjuntos: Number(r.att_count ?? 0),
+    // Nombre visible del autor
+    user_name: r.created_by_name || r.created_by_email || 'Sin nombre',
+    folio: r.folio,
+    folio_serial: typeof r.folio_serial === 'number' ? r.folio_serial : null,
+  }))
 }
 
 /**
