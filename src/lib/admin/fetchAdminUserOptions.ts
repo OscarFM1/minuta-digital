@@ -8,7 +8,6 @@ export type AdminUserOption = {
   minutes_count: number;
 };
 
-/** Helper con args opcionales para evitar el error de TS. */
 async function rpcWithFallback<T = any>(
   client: SupabaseClient,
   nameV2: string,

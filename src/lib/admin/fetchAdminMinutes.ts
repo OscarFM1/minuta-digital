@@ -2,9 +2,9 @@
  * src/lib/admin/fetchAdminMinutes.ts
  * -----------------------------------------------------------------------------
  * Carga minutas en Admin vía RPC:
- *   - v2: public.admin_minutes_page_v2(...)
- *   - fallback: public.admin_minutes_page(...)
- * Tipado estricto y helper con args opcionales para evitar errores TS.
+ *  - v2: public.admin_minutes_page_v2(...)
+ *  - fallback: public.admin_minutes_page(...)
+ * Normaliza formato de salida (v2 {items...} / v1 array) para evitar listas vacías.
  * Recuerda subir cualquier cambio a Git.
  */
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
@@ -45,7 +45,6 @@ function toDateOnly(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Helper: llama v2 y cae a v1 si no existe. `args` es opcional. */
 async function rpcWithFallback<T = any>(
   client: SupabaseClient,
   nameV2: string,
@@ -73,14 +72,7 @@ export async function fetchAdminMinutes(params: {
   limit?: number;
   offset?: number;
 }): Promise<AdminMinutesResponse> {
-  const {
-    from,
-    to,
-    userId = null,
-    tz = 'America/Bogota',
-    limit = 50,
-    offset = 0,
-  } = params;
+  const { from, to, userId = null, tz = 'America/Bogota', limit = 50, offset = 0 } = params;
 
   const supa = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -90,15 +82,16 @@ export async function fetchAdminMinutes(params: {
   const p_from_date = toDateOnly(from);
   const p_to_date   = toDateOnly(to);
 
-  const data = await rpcWithFallback<any>(
+  const data: any = await rpcWithFallback(
     supa,
     'admin_minutes_page_v2',
     'admin_minutes_page',
     { p_from_date, p_to_date, p_user_id: userId, p_tz: tz, p_limit: limit, p_offset: offset }
   );
 
-  const items = (data?.items ?? []) as AdminMinuteItem[];
-  const totalRows = Number(data?.total_rows ?? 0);
+  // Normaliza: v2 = {items...}; v1 = array
+  const items = (Array.isArray(data) ? data : data?.items ?? []) as AdminMinuteItem[];
+  const totalRows = Number(data?.total_rows ?? (Array.isArray(data) ? data.length : 0));
   const totalMinutes = Math.floor(Number(data?.total_seconds ?? 0) / 60);
 
   return { items, totalRows, totalMinutes };
