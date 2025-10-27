@@ -1,16 +1,8 @@
 // src/pages/minutas/index.tsx
-/**
- * /minutas — Vista GLOBAL para ADMIN / SUPER_ADMIN (solo lectura)
- * -----------------------------------------------------------------------------
- * - Filtros: usuario (datalist por RPC) + rango de fechas.
- * - Realtime por tabla 'minute'.
- * - Backend: admin_minutes_page + admin_minute_user_options (RPCs).
- */
-
 import React, { useEffect, useState } from 'react';
 import Head from 'next/head';
 import { useRouter } from 'next/router';
-import { Container, Row, Col, Button, Form, InputGroup, Accordion } from 'react-bootstrap';
+import { Container, Row, Col, Button, Form, InputGroup, Accordion, Alert } from 'react-bootstrap';
 import useSWR from 'swr';
 import { supabase } from '@/lib/supabaseClient';
 import MinuteCard, { MinuteCardData } from '@/components/MinuteCard';
@@ -19,64 +11,47 @@ import { useFirstLoginGate } from '@/hooks/useFirstLoginGate';
 import AdminResetPassword from '@/components/AdminResetPassword';
 import RequireRole from '@/components/RequireRole';
 
-/* ============================================================================
- * Utilidades de fecha (evitar NULL en RPCs)
- * ========================================================================== */
+const DEBUG = true;
+
+/* ---- fechas seguras (evitar NULL en RPC) ---- */
 const toISODate = (d: Date) => d.toISOString().slice(0, 10);
 const today = () => new Date();
 const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
 
-// Rango por defecto: últimos 30 días
-const DEFAULT_FROM = toISODate(daysAgo(30));
+// ⚠️ Rango amplio por defecto para garantizar resultados
+const DEFAULT_FROM = toISODate(daysAgo(365));   // último año
 const DEFAULT_TO   = toISODate(today());
 
-type Filters = { desde?: string; hasta?: string; userId?: string | null; userQuery?: string };
+type Filters = { desde: string; hasta: string; userId: string | null };
 type UserOption = { value: string; label: string };
 
 type RpcAdminItem = {
-  id: string;
-  date: string;
-  start_time: string | null;
-  end_time: string | null;
-  started_at: string | null;
-  ended_at: string | null;
-  description: string | null;
-  tarea_realizada: string | null;
-  created_by_name: string | null;
-  created_by_email: string | null;
-  folio: string | null;
-  folio_serial: number | null;
-  attachments_count: number;
-  duration_seconds: number;
-  user_id: string | null;
+  id: string; date: string;
+  start_time: string | null; end_time: string | null;
+  started_at: string | null; ended_at: string | null;
+  description: string | null; tarea_realizada: string | null;
+  created_by_name: string | null; created_by_email: string | null;
+  folio: string | null; folio_serial: number | null;
+  attachments_count: number; duration_seconds: number; user_id: string | null;
 };
 
-/* =============================================================================
- * Fetchers
- * ========================================================================== */
-
-/**
- * Admin (GLOBAL): lista paginada via RPC + mapeo a MinuteCardData.
- * La RPC devuelve { items, total_rows, total_seconds }.
- * Nunca enviar NULL en fechas → usar DEFAULT_FROM/DEFAULT_TO.
- */
+/* -------------------- Fetchers -------------------- */
 async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
-  const p_from_date = (filters.desde && filters.desde.length) ? filters.desde : DEFAULT_FROM;
-  const p_to_date   = (filters.hasta && filters.hasta.length) ? filters.hasta : DEFAULT_TO;
-  const p_user_id   = filters.userId ?? null;
+  const p_from_date = filters.desde || DEFAULT_FROM;
+  const p_to_date   = filters.hasta || DEFAULT_TO;
+  const p_user_id   = filters.userId; // puede ser null
   const p_tz        = 'America/Bogota';
 
-  const { data, error } = await supabase.rpc('admin_minutes_page', {
-    p_from_date, p_to_date, p_user_id, p_tz, p_limit: 200, p_offset: 0,
-  });
+  const payload = { p_from_date, p_to_date, p_user_id, p_tz, p_limit: 200, p_offset: 0 };
+  if (DEBUG) console.info('[admin_minutes_page] payload', payload);
 
+  const { data, error } = await supabase.rpc('admin_minutes_page', payload);
   if (error) {
-    // eslint-disable-next-line no-console
-    console.error('[admin_minutes_page] error', error);
+    if (DEBUG) console.error('[admin_minutes_page] error', error);
     throw new Error(error.message);
   }
-
   const items = (data?.items ?? []) as RpcAdminItem[];
+  if (DEBUG) console.info('[admin_minutes_page] items.len', items.length);
 
   return items.map((r) => ({
     id: r.id,
@@ -91,22 +66,17 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
   }));
 }
 
-/**
- * Opciones de usuario para el datalist (RPC; evita tocar tabla directamente).
- * También usa rango por defecto para no enviar NULL.
- */
-async function fetchUserOptions(from?: string, to?: string): Promise<UserOption[]> {
-  const p_from_date = (from && from.length) ? from : DEFAULT_FROM;
-  const p_to_date   = (to && to.length) ? to   : DEFAULT_TO;
+async function fetchUserOptions(from: string, to: string): Promise<UserOption[]> {
+  const p_from_date = from || DEFAULT_FROM;
+  const p_to_date   = to || DEFAULT_TO;
   const p_tz        = 'America/Bogota';
 
-  const { data, error } = await supabase.rpc('admin_minute_user_options', {
-    p_from_date, p_to_date, p_tz, p_limit: 100,
-  });
+  const payload = { p_from_date, p_to_date, p_tz, p_limit: 100 };
+  if (DEBUG) console.info('[admin_minute_user_options] payload', payload);
 
+  const { data, error } = await supabase.rpc('admin_minute_user_options', payload);
   if (error) {
-    // eslint-disable-next-line no-console
-    console.error('[admin_minute_user_options] error', error);
+    if (DEBUG) console.error('[admin_minute_user_options] error', error);
     throw new Error(error.message);
   }
 
@@ -116,19 +86,15 @@ async function fetchUserOptions(from?: string, to?: string): Promise<UserOption[
     const email = r.created_by_email?.trim();
     const name  = r.created_by_name?.trim();
     const label = email && name ? `${name} <${email}>` : (email || name || '');
-    const value = r.user_id; // usamos UUID como value
-    if (!value || !label) continue;
-    if (seen.has(value)) continue;
+    const value = r.user_id;
+    if (!value || !label || seen.has(value)) continue;
     seen.add(value);
     out.push({ value, label });
   }
   return out;
 }
 
-/* =============================================================================
- * Page Wrapper
- * ========================================================================== */
-
+/* -------------------- Page -------------------- */
 export default function MinutasGlobalPage() {
   return (
     <>
@@ -140,15 +106,10 @@ export default function MinutasGlobalPage() {
   );
 }
 
-/* =============================================================================
- * AdminMinutasView
- * ========================================================================== */
-
 function AdminMinutasView() {
   useFirstLoginGate();
   const router = useRouter();
 
-  // Filtros con valores por defecto (últimos 30 días)
   const [filters, setFilters] = useState<Filters>({
     desde: DEFAULT_FROM,
     hasta: DEFAULT_TO,
@@ -156,26 +117,18 @@ function AdminMinutasView() {
   });
   const [forceKey, setForceKey] = useState<number>(0);
 
-  // SWR: key serializable (fechas + userId + forceKey)
   const { data: items, error, isLoading, mutate } = useSWR<MinuteCardData[]>(
-    ['admin-minutes', filters.desde ?? DEFAULT_FROM, filters.hasta ?? DEFAULT_TO, filters.userId ?? '', forceKey],
+    ['admin-minutes', filters.desde, filters.hasta, filters.userId ?? '', forceKey],
     () => fetchMinutes(filters),
-    {
-      revalidateIfStale: true,
-      revalidateOnFocus: false,
-      revalidateOnReconnect: true,
-      keepPreviousData: false,
-      dedupingInterval: 0,
-    }
+    { revalidateIfStale: true, revalidateOnFocus: false, revalidateOnReconnect: true, keepPreviousData: false, dedupingInterval: 0 }
   );
 
   const { data: userOptions } = useSWR<UserOption[]>(
-    ['admin-minute-users', filters.desde ?? DEFAULT_FROM, filters.hasta ?? DEFAULT_TO],
+    ['admin-minute-users', filters.desde, filters.hasta],
     () => fetchUserOptions(filters.desde, filters.hasta),
     { revalidateOnFocus: false }
   );
 
-  // Realtime: refrescar lista ante cualquier cambio en 'minute'
   useEffect(() => {
     const ch = supabase
       .channel('minute-admin')
@@ -184,53 +137,45 @@ function AdminMinutasView() {
     return () => { supabase.removeChannel(ch); };
   }, [mutate]);
 
-  // Navegación a detalle
   const onView = (id: string) => { void router.push(`/minutas/${id}`); };
-
-  // Refresh manual
   const handleHardRefresh = () => { setForceKey(Date.now()); void mutate(); };
 
-  // Handlers de filtros
-  const handleUser = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value || '';
-    setFilters((f) => ({ ...f, userId: value || null }));
-  };
-  const handleDesde = (e: React.ChangeEvent<HTMLInputElement>) =>
-    setFilters((f) => ({ ...f, desde: e.target.value || DEFAULT_FROM }));
-  const handleHasta = (e: React.ChangeEvent<HTMLInputElement>) =>
-    setFilters((f) => ({ ...f, hasta: e.target.value || DEFAULT_TO }));
+  const handleUser  = (e: React.ChangeEvent<HTMLInputElement>) => setFilters((f) => ({ ...f, userId: e.target.value || null }));
+  const handleDesde = (e: React.ChangeEvent<HTMLInputElement>) => setFilters((f) => ({ ...f, desde: e.target.value || DEFAULT_FROM }));
+  const handleHasta = (e: React.ChangeEvent<HTMLInputElement>) => setFilters((f) => ({ ...f, hasta: e.target.value || DEFAULT_TO }));
 
   const clearFilters = () => setFilters({ desde: DEFAULT_FROM, hasta: DEFAULT_TO, userId: null });
+  const verTodo180 = () => setFilters((f) => ({ ...f, desde: toISODate(daysAgo(180)), hasta: DEFAULT_TO }));
 
   return (
     <Container fluid className={styles.bg}>
       <Row className="justify-content-between align-items-center mt-5 mb-3">
         <Col><h1 className={styles.title}>Minutas (Admin)</h1></Col>
         <Col xs="auto" className="d-flex gap-2">
-          <Button variant="outline-primary" onClick={() => router.push('/minutas/estadisticas')}>
-            Ir a estadísticas
-          </Button>
-          <Button variant="outline-secondary" onClick={handleHardRefresh}>
-            Actualizar
-          </Button>
-          <Button as="a" href="/logout" variant="outline-secondary">
-            Cerrar sesión
-          </Button>
+          <Button variant="outline-primary" onClick={() => router.push('/minutas/estadisticas')}>Ir a estadísticas</Button>
+          <Button variant="outline-secondary" onClick={handleHardRefresh}>Actualizar</Button>
+          <Button as="a" href="/logout" variant="outline-secondary">Cerrar sesión</Button>
         </Col>
       </Row>
 
       <Row className="mb-4">
         <Col lg={8} xl={7}>
-          <Accordion defaultActiveKey={undefined} alwaysOpen={false}>
+          <Accordion>
             <Accordion.Item eventKey="reset">
               <Accordion.Header>Reset de contraseña (ADMIN)</Accordion.Header>
-              <Accordion.Body>
-                <AdminResetPassword />
-              </Accordion.Body>
+              <Accordion.Body><AdminResetPassword /></Accordion.Body>
             </Accordion.Item>
           </Accordion>
         </Col>
       </Row>
+
+      {DEBUG && (
+        <Alert variant="dark" className="py-2">
+          <small>
+            <b>DEBUG</b> • from: <code>{filters.desde}</code> • to: <code>{filters.hasta}</code> • userId: <code>{filters.userId ?? 'null'}</code>
+          </small>
+        </Alert>
+      )}
 
       <Row className="g-3 align-items-end mb-4">
         <Col md={5} lg={4}>
@@ -250,42 +195,33 @@ function AdminMinutasView() {
               ))}
             </datalist>
           </InputGroup>
-          <Form.Text>Selecciona una opción del listado (usa el UUID internamente).</Form.Text>
+          <Form.Text>Selecciona del listado (UUID interno).</Form.Text>
         </Col>
 
         <Col md={3} lg={3}>
           <Form.Label>Desde</Form.Label>
-          <Form.Control type="date" value={filters.desde ?? DEFAULT_FROM} onChange={handleDesde} />
+          <Form.Control type="date" value={filters.desde} onChange={handleDesde} />
         </Col>
 
         <Col md={3} lg={3}>
           <Form.Label>Hasta</Form.Label>
-          <Form.Control type="date" value={filters.hasta ?? DEFAULT_TO} onChange={handleHasta} />
+          <Form.Control type="date" value={filters.hasta} onChange={handleHasta} />
         </Col>
 
-        <Col md={1} lg={2} className="d-flex">
-          <Button variant="outline-secondary" className="ms-auto" onClick={clearFilters}>
-            Limpiar
-          </Button>
+        <Col md={1} lg={2} className="d-flex gap-2">
+          <Button variant="outline-secondary" className="ms-auto" onClick={clearFilters}>Limpiar</Button>
+          <Button variant="outline-dark" onClick={verTodo180} title="Últimos 180 días">Ver todo</Button>
         </Col>
       </Row>
 
       {error && <p className="text-danger mt-3">Error al cargar minutas: {String(error.message || error)}</p>}
       {isLoading && <p className="mt-3">Cargando…</p>}
-      {!isLoading && !error && (items?.length ?? 0) === 0 && (
-        <p className="mt-3">No hay minutas para mostrar.</p>
-      )}
+      {!isLoading && !error && (items?.length ?? 0) === 0 && (<p className="mt-3">No hay minutas para mostrar.</p>)}
 
       <Row xs={1} sm={2} md={3} lg={4} className="g-4">
         {items?.map((m) => (
           <Col key={m.id}>
-            <MinuteCard
-              minuta={m}
-              mode="read"
-              evidenceReadOnly
-              onView={onView}
-              viewHref={`/minutas/${m.id}`}
-            />
+            <MinuteCard minuta={m} mode="read" evidenceReadOnly onView={onView} viewHref={`/minutas/${m.id}`} />
           </Col>
         ))}
       </Row>
