@@ -13,13 +13,13 @@ import RequireRole from '@/components/RequireRole';
 
 const DEBUG = true;
 
-/* ---- fechas seguras (evitar NULL en RPC) ---- */
+/* ---- Fechas seguras ---- */
 const toISODate = (d: Date) => d.toISOString().slice(0, 10);
 const today = () => new Date();
 const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000);
 
-// ⚠️ Rango amplio por defecto para garantizar resultados
-const DEFAULT_FROM = toISODate(daysAgo(365));   // último año
+// Rango por defecto
+const DEFAULT_FROM = toISODate(daysAgo(365)); // último año
 const DEFAULT_TO   = toISODate(today());
 
 type Filters = { desde: string; hasta: string; userId: string | null };
@@ -35,6 +35,21 @@ type RpcAdminItem = {
   attachments_count: number; duration_seconds: number; user_id: string | null;
 };
 
+/** Helper: llama v2 y cae a v1 si aún no existe. `args` es opcional. */
+async function rpcWithFallback<T = any>(nameV2: string, nameV1: string, args?: Record<string, unknown>) {
+  const v2 = await supabase.rpc(nameV2, args ?? {});
+  if (v2.error) {
+    const msg = v2.error.message?.toLowerCase() ?? '';
+    if (msg.includes('not found') || msg.includes('rpc')) {
+      const v1 = await supabase.rpc(nameV1, args ?? {});
+      if (v1.error) throw v1.error;
+      return v1.data as T;
+    }
+    throw v2.error;
+  }
+  return v2.data as T;
+}
+
 /* -------------------- Fetchers -------------------- */
 async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
   const p_from_date = filters.desde || DEFAULT_FROM;
@@ -45,15 +60,19 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
   const payload = { p_from_date, p_to_date, p_user_id, p_tz, p_limit: 200, p_offset: 0 };
   if (DEBUG) console.info('[admin_minutes_page] payload', payload);
 
-  const { data, error } = await supabase.rpc('admin_minutes_page', payload);
-  if (error) {
-    if (DEBUG) console.error('[admin_minutes_page] error', error);
-    throw new Error(error.message);
-  }
-  const items = (data?.items ?? []) as RpcAdminItem[];
-  if (DEBUG) console.info('[admin_minutes_page] items.len', items.length);
+  // v2 con fallback a v1
+  const data: any = await rpcWithFallback('admin_minutes_page_v2', 'admin_minutes_page', payload);
 
-  return items.map((r) => ({
+  // 🔧 Normalización de formato (v2={items...} | v1=[...])
+  const rawItems: RpcAdminItem[] = Array.isArray(data)
+    ? (data as RpcAdminItem[])
+    : Array.isArray(data?.items)
+      ? (data.items as RpcAdminItem[])
+      : [];
+
+  if (DEBUG) console.info('[admin_minutes_page] items.len(norm)', rawItems.length, { rawType: Array.isArray(data) ? 'array' : typeof data });
+
+  return rawItems.map((r) => ({
     id: r.id,
     date: r.date,
     start_time: r.start_time,
@@ -74,11 +93,7 @@ async function fetchUserOptions(from: string, to: string): Promise<UserOption[]>
   const payload = { p_from_date, p_to_date, p_tz, p_limit: 100 };
   if (DEBUG) console.info('[admin_minute_user_options] payload', payload);
 
-  const { data, error } = await supabase.rpc('admin_minute_user_options', payload);
-  if (error) {
-    if (DEBUG) console.error('[admin_minute_user_options] error', error);
-    throw new Error(error.message);
-  }
+  const data: any[] = await rpcWithFallback('admin_minute_user_options_v2', 'admin_minute_user_options', payload);
 
   const out: UserOption[] = [];
   const seen = new Set<string>();
