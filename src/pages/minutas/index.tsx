@@ -1,130 +1,136 @@
+// PR: ui-only marker (admin minutas)
+// PR: ui-only marker (admin minutas) — safe to remove after merge
+// src/pages/minutas/index.tsx
 /**
  * /minutas — Vista GLOBAL para ADMIN / SUPER_ADMIN (solo lectura)
  * -----------------------------------------------------------------------------
  * - Gating por rol con <RequireRole allow={['admin','super_admin']}>.
- * - Misma UI para TODOS los administradores (Esteban, operaciones, etc.).
- * - Filtros: usuario (datalist) + rango de fechas.
+ * - Filtros: usuario (datalist por RPC) + rango de fechas.
  * - Realtime: refresca al cambiar 'minute'.
  * - Listado con MinuteCard en mode="read" (evidencias en RO).
- * - Bloque "Reset de contraseña (ADMIN)" (usa /api/admin/password-reset).
  *
- * NOTAS DE INGENIERÍA
- * - Esta vista es GLOBAL (admin); aquí usamos una RPC específica:
- *   `admin_minutes_page(p_from, p_to, p_user, p_limit, p_offset)` con SECURITY DEFINER,
- *   que devuelve: lista de minutas + conteo de adjuntos + totales del set.
- * - Evitamos selects anidados tipo `attachment(count)` que en algunos contextos
- *   pueden disparar recursión/stack depth por RLS/funciones dependientes.
+ * Backend:
+ * - admin_minutes_page(p_from_date, p_to_date, p_user_id, p_tz, p_limit, p_offset)
+ *   => { items jsonb[], total_rows bigint, total_seconds bigint }
+ * - admin_minute_user_options(p_from_date, p_to_date, p_tz, p_limit)
+ *   => opciones para el datalist (user_id, created_by_name, created_by_email, minutes_count)
  */
 
-import React, { useEffect, useState } from 'react'
-import Head from 'next/head'
-import { useRouter } from 'next/router'
+import React, { useEffect, useState } from 'react';
+import Head from 'next/head';
+import { useRouter } from 'next/router';
 import {
   Container, Row, Col, Button, Form, InputGroup, Accordion,
-} from 'react-bootstrap'
-import useSWR from 'swr'
-import { supabase } from '@/lib/supabaseClient'
-import MinuteCard, { MinuteCardData } from '@/components/MinuteCard'
-import styles from '@/styles/Minutas.module.css'
-import { useFirstLoginGate } from '@/hooks/useFirstLoginGate'
-import AdminResetPassword from '@/components/AdminResetPassword'
-import RequireRole from '@/components/RequireRole'
+} from 'react-bootstrap';
+import useSWR from 'swr';
+import { supabase } from '@/lib/supabaseClient';
+import MinuteCard, { MinuteCardData } from '@/components/MinuteCard';
+import styles from '@/styles/Minutas.module.css';
+import { useFirstLoginGate } from '@/hooks/useFirstLoginGate';
+import AdminResetPassword from '@/components/AdminResetPassword';
+import RequireRole from '@/components/RequireRole';
 
-type Filters = { desde?: string; hasta?: string; user?: string }
-type UserOption = { value: string; label: string }
+type Filters = { desde?: string; hasta?: string; userId?: string | null; userQuery?: string };
+type UserOption = { value: string; label: string };
 
-/**
- * Filas que retorna la RPC admin_minutes_page.
- * Incluye: datos de la minuta, conteo de adjuntos y totales del set (repetidos por fila).
- */
-type AdminPageRow = {
-  id: string
-  date: string
-  start_time: string | null
-  end_time: string | null
-  started_at: string | null
-  ended_at: string | null
-  description: string | null
-  tarea_realizada: string | null
-  created_by_name: string | null
-  created_by_email: string | null
-  folio: string | null
-  folio_serial: number | null
-  att_count: number
-  total_rows: number | string
-  total_seconds: number | string
-}
+type RpcAdminItem = {
+  id: string;
+  date: string;
+  start_time: string | null;
+  end_time: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  description: string | null;
+  tarea_realizada: string | null;
+  created_by_name: string | null;
+  created_by_email: string | null;
+  folio: string | null;
+  folio_serial: number | null;
+  attachments_count: number;
+  duration_seconds: number;
+  user_id: string | null;
+};
 
 /* =============================================================================
  * Fetchers
  * ========================================================================== */
 
 /**
- * ✅ Admin (GLOBAL): lista + conteo de adjuntos + totales via RPC.
- * - Evita selects anidados (no usamos `attachment(count)`).
- * - Soporta filtros de rango y búsqueda por usuario (nombre o correo).
- * - Si en el futuro quieres un StatsBar admin, puedes leer `rows[0].total_rows`
- *   y `rows[0].total_seconds` aquí mismo y subirlo por estado/props.
+ * ✅ Admin (GLOBAL): lista paginada via RPC + mapeo a MinuteCardData.
+ * IMPORTANTE: la RPC devuelve { items, total_rows, total_seconds }.
  */
 async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
-  const { desde, hasta } = filters
-  const user = filters.user?.trim() || null
+  const p_from_date = filters.desde ?? null; // 'YYYY-MM-DD' o null
+  const p_to_date   = filters.hasta ?? null;
+  const p_user_id   = filters.userId ?? null; // si no tienes el UUID, pasa null
+  const p_tz        = 'America/Bogota';
 
   const { data, error } = await supabase.rpc('admin_minutes_page', {
-    p_from:  desde ?? null,
-    p_to:    hasta ?? null,
-    p_user:  user,
+    p_from_date,
+    p_to_date,
+    p_user_id,
+    p_tz,
     p_limit: 200,
     p_offset: 0,
-  })
-  if (error) throw error
+  });
 
-  const rows = (data ?? []) as AdminPageRow[]
+  if (error) {
+    // Log útil para backend
+    // eslint-disable-next-line no-console
+    console.error('[admin_minutes_page] error', error);
+    throw new Error(error.message);
+  }
 
-  return rows.map(r => ({
+  const items = (data?.items ?? []) as RpcAdminItem[];
+
+  return items.map((r) => ({
     id: r.id,
     date: r.date,
     start_time: r.start_time,
     end_time: r.end_time,
-    // Title/desc: prioriza `description`, respaldo `tarea_realizada`
     description: r.description ?? r.tarea_realizada ?? null,
-    // Conteo de adjuntos que viene calculado en la RPC
-    adjuntos: Number(r.att_count ?? 0),
-    // Nombre visible del autor
+    adjuntos: Number(r.attachments_count ?? 0),
     user_name: r.created_by_name || r.created_by_email || 'Sin nombre',
-    folio: r.folio,
-    folio_serial: typeof r.folio_serial === 'number' ? r.folio_serial : null,
-  }))
+    folio: r.folio ?? undefined,
+    folio_serial: typeof r.folio_serial === 'number' ? r.folio_serial : undefined,
+  }));
 }
 
 /**
- * Lista las opciones de usuario (nombre/correo) para el datalist de búsqueda.
- * - Deduplica por email/nombre (normalizados a lower-case).
+ * ✅ Opciones de usuario para el datalist (sin tocar la tabla minute directamente).
+ * Usa la RPC admin_minute_user_options para evitar ambigüedades/ordenamientos.
  */
-async function fetchUserOptions(): Promise<UserOption[]> {
-  const { data, error } = await supabase
-    .from('minute')
-    .select('created_by_name, created_by_email')
-    .order('created_by_name', { ascending: true })
+async function fetchUserOptions(from?: string, to?: string): Promise<UserOption[]> {
+  const p_from_date = from ?? null;
+  const p_to_date   = to ?? null;
+  const p_tz        = 'America/Bogota';
 
-  if (error) throw error
+  const { data, error } = await supabase.rpc('admin_minute_user_options', {
+    p_from_date,
+    p_to_date,
+    p_tz,
+    p_limit: 100,
+  });
 
-  const seen = new Set<string>()
-  const out: UserOption[] = []
-
-  for (const row of (data ?? [])) {
-    const email = (row as any).created_by_email as string | null
-    const name  = (row as any).created_by_name  as string | null
-    const value = email?.trim() || name?.trim()
-    if (!value) continue
-    const key = (email || name)!.toLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    const label = email && name ? `${name} <${email}>` : (email || name!)!
-    out.push({ value, label })
+  if (error) {
+    // eslint-disable-next-line no-console
+    console.error('[admin_minute_user_options] error', error);
+    throw new Error(error.message);
   }
 
-  return out
+  const out: UserOption[] = [];
+  const seen = new Set<string>();
+  for (const r of (data ?? []) as Array<{ user_id: string; created_by_name: string | null; created_by_email: string | null }>) {
+    const email = r.created_by_email?.trim();
+    const name  = r.created_by_name?.trim();
+    const label = email && name ? `${name} <${email}>` : (email || name || '');
+    const value = r.user_id; // value será el UUID; más estable para filtrar
+    if (!value || !label) continue;
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push({ value, label });
+  }
+  return out;
 }
 
 /* =============================================================================
@@ -139,7 +145,7 @@ export default function MinutasGlobalPage() {
         <AdminMinutasView />
       </RequireRole>
     </>
-  )
+  );
 }
 
 /* =============================================================================
@@ -147,18 +153,18 @@ export default function MinutasGlobalPage() {
  * ========================================================================== */
 
 function AdminMinutasView() {
-  useFirstLoginGate()
-  const router = useRouter()
+  useFirstLoginGate();
+  const router = useRouter();
 
-  const [filters, setFilters] = useState<Filters>({})
-  const [forceKey, setForceKey] = useState<number>(0)
+  const [filters, setFilters] = useState<Filters>({});
+  const [forceKey, setForceKey] = useState<number>(0);
 
   /**
-   * SWR: usamos una key compuesta para que revalide al cambiar cualquier filtro
-   * o al forzar un refresh (forceKey).
+   * SWR: key serializable (fechas + userId + forceKey).
+   * Nota: enviamos userId (UUID) — si el usuario escribe texto libre, guárdalo en userQuery.
    */
   const { data: items, error, isLoading, mutate } = useSWR<MinuteCardData[]>(
-    ['admin-minutes', filters, forceKey],
+    ['admin-minutes', filters.desde ?? '', filters.hasta ?? '', filters.userId ?? '', forceKey],
     () => fetchMinutes(filters),
     {
       revalidateIfStale: true,
@@ -167,34 +173,41 @@ function AdminMinutasView() {
       keepPreviousData: false,
       dedupingInterval: 0,
     }
-  )
+  );
 
   const { data: userOptions } = useSWR<UserOption[]>(
-    'admin-minute-users',
-    fetchUserOptions,
+    ['admin-minute-users', filters.desde ?? '', filters.hasta ?? ''],
+    () => fetchUserOptions(filters.desde, filters.hasta),
     { revalidateOnFocus: false }
-  )
+  );
 
   // Realtime: refrescamos la lista ante cualquier cambio en 'minute'
   useEffect(() => {
     const ch = supabase
       .channel('minute-admin')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'minute' }, () => { mutate() })
-      .subscribe()
-    return () => { supabase.removeChannel(ch) }
-  }, [mutate])
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'minute' }, () => { mutate(); })
+      .subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [mutate]);
 
   // Navegación a detalle
-  const onView = (id: string) => { void router.push(`/minutas/${id}`) }
+  const onView = (id: string) => { void router.push(`/minutas/${id}`); };
 
   // Refresh manual (además de SWR)
-  const handleHardRefresh = () => { setForceKey(Date.now()); void mutate() }
+  const handleHardRefresh = () => { setForceKey(Date.now()); void mutate(); };
 
   // Handlers de filtros
-  const handleUser  = (e: React.ChangeEvent<HTMLInputElement>) => setFilters(f => ({ ...f, user:  e.target.value || undefined }))
-  const handleDesde = (e: React.ChangeEvent<HTMLInputElement>) => setFilters(f => ({ ...f, desde: e.target.value || undefined }))
-  const handleHasta = (e: React.ChangeEvent<HTMLInputElement>) => setFilters(f => ({ ...f, hasta: e.target.value || undefined }))
-  const clearFilters = () => setFilters({})
+  const handleUser = (e: React.ChangeEvent<HTMLInputElement>) => {
+    // value es el user_id (UUID) porque usamos <option value={uuid} />
+    const value = e.target.value || '';
+    setFilters((f) => ({ ...f, userId: value || null }));
+  };
+  const handleDesde = (e: React.ChangeEvent<HTMLInputElement>) =>
+    setFilters((f) => ({ ...f, desde: e.target.value || undefined }));
+  const handleHasta = (e: React.ChangeEvent<HTMLInputElement>) =>
+    setFilters((f) => ({ ...f, hasta: e.target.value || undefined }));
+
+  const clearFilters = () => setFilters({});
 
   return (
     <Container fluid className={styles.bg}>
@@ -234,17 +247,18 @@ function AdminMinutasView() {
             <Form.Control
               type="text"
               placeholder="Nombre o correo"
-              value={filters.user ?? ''}
+              value={filters.userId ?? ''}
               onChange={handleUser}
               list="admin-users-datalist"
               aria-label="Filtrar por usuario (nombre o correo)"
             />
             <datalist id="admin-users-datalist">
-              {userOptions?.map(opt => (
+              {userOptions?.map((opt) => (
                 <option key={opt.value} value={opt.value}>{opt.label}</option>
               ))}
             </datalist>
           </InputGroup>
+          <Form.Text>Selecciona una opción del listado (usa el UUID internamente).</Form.Text>
         </Col>
 
         <Col md={3} lg={3}>
@@ -264,14 +278,14 @@ function AdminMinutasView() {
         </Col>
       </Row>
 
-      {error && <p className="text-danger mt-3">Error al cargar minutas: {error.message}</p>}
+      {error && <p className="text-danger mt-3">Error al cargar minutas: {String(error.message || error)}</p>}
       {isLoading && <p className="mt-3">Cargando…</p>}
       {!isLoading && !error && (items?.length ?? 0) === 0 && (
         <p className="mt-3">No hay minutas para mostrar.</p>
       )}
 
       <Row xs={1} sm={2} md={3} lg={4} className="g-4">
-        {items?.map(m => (
+        {items?.map((m) => (
           <Col key={m.id}>
             <MinuteCard
               minuta={m}
@@ -284,5 +298,5 @@ function AdminMinutasView() {
         ))}
       </Row>
     </Container>
-  )
+  );
 }

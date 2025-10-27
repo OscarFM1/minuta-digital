@@ -1,3 +1,5 @@
+// PR: ui-only marker (admin minutas)
+// PR: ui-only marker (admin minutas) — safe to remove after merge
 // src/pages/_app.tsx
 /**
  * App Root (Next.js - Pages Router)
