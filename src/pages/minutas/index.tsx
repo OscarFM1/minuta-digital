@@ -52,17 +52,21 @@ type RpcAdminItem = {
   attachments_count: { id: string }[];
 };
 
-/** RPC v2→v1 */
+/** RPC v2→v1 con logs RAW */
 async function rpcWithFallback<T = any>(
   nameV2: string,
   nameV1: string,
   args?: Record<string, unknown>
 ): Promise<T> {
+  if (DEBUG) console.info(`[rpcWithFallback] llamando ${nameV2} con:`, args);
   const v2 = await supabase.rpc(nameV2, args ?? {});
+  if (DEBUG) console.info(`[rpcWithFallback] raw v2 result:`, v2);
   if (v2.error) {
     const msg = v2.error.message?.toLowerCase() ?? '';
     if (msg.includes('not found') || msg.includes('rpc')) {
+      if (DEBUG) console.warn(`[rpcWithFallback] v2 falló, llamando ${nameV1}`);
       const v1 = await supabase.rpc(nameV1, args ?? {});
+      if (DEBUG) console.info(`[rpcWithFallback] raw v1 result:`, v1);
       if (v1.error) throw v1.error;
       return v1.data as T;
     }
@@ -80,7 +84,7 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
     p_limit: 200,
     p_offset: 0,
   };
-  if (DEBUG) console.info('[admin_minutes_page] payload', payload);
+  if (DEBUG) console.info('[fetchMinutes] payload', payload);
 
   // 1) RPC con fallback
   try {
@@ -89,12 +93,16 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
       'admin_minutes_page',
       payload
     );
-    const rawItems: RpcAdminItem[] = Array.isArray(data)
-      ? data
-      : Array.isArray(data?.items)
-      ? data.items
-      : [];
-    if (DEBUG) console.info('[admin_minutes_page] RPC count', rawItems.length);
+    if (DEBUG) console.info('[fetchMinutes] RPC raw data', data);
+
+    let rawItems: RpcAdminItem[] = [];
+    if (Array.isArray(data)) {
+      rawItems = Array.isArray(data[0]?.items) ? data[0].items : (data as RpcAdminItem[]);
+    } else if (Array.isArray(data.items)) {
+      rawItems = data.items;
+    }
+
+    if (DEBUG) console.info('[fetchMinutes] RPC count', rawItems.length, rawItems);
     if (rawItems.length) {
       return rawItems.map((r) => ({
         id: r.id,
@@ -115,7 +123,9 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
   }
 
   // 2) Fallback directo a tabla `minute`
-  const res = await supabase.from('minute').select(`
+  const res = await supabase
+    .from('minute')
+    .select(`
       id,
       date,
       start_time,
@@ -132,9 +142,10 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
     console.error('[fetchMinutes] fallback error', res.error);
     throw res.error;
   }
+  if (DEBUG) console.info('[fetchMinutes] fallback raw rows', res.data);
+
   const rows = res.data as RpcAdminItem[];
   if (DEBUG) console.info('[fetchMinutes] fallback count', rows.length);
-
   return rows.map((r) => ({
     id: r.id,
     date: r.date,
@@ -153,8 +164,13 @@ async function fetchUserOptions(
   from: string | null,
   to: string | null
 ): Promise<UserOption[]> {
-  const payload = { p_from_date: from, p_to_date: to, p_tz: 'America/Bogota', p_limit: 100 };
-  if (DEBUG) console.info('[admin_minute_user_options] payload', payload);
+  const payload = {
+    p_from_date: from,
+    p_to_date: to,
+    p_tz: 'America/Bogota',
+    p_limit: 100,
+  };
+  if (DEBUG) console.info('[fetchUserOptions] payload', payload);
 
   const data: any[] = await rpcWithFallback(
     'admin_minute_user_options_v2',
@@ -198,6 +214,10 @@ function AdminMinutasView() {
   });
   const [forceKey, setForceKey] = useState(0);
 
+  useEffect(() => {
+    if (DEBUG) console.info('[AdminMinutasView] filtros actualizados:', filters);
+  }, [filters]);
+
   const { data: items, error, isLoading, mutate } = useSWR<MinuteCardData[]>(
     ['admin-minutes', filters.desde, filters.hasta, filters.userId, forceKey],
     () => fetchMinutes(filters),
@@ -217,12 +237,16 @@ function AdminMinutasView() {
   );
 
   useEffect(() => {
-    // Suscripción sin async
     const ch = supabase
       .channel('minute-admin')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'minute' }, () => {
-        void mutate();
-      })
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'minute' },
+        () => {
+          if (DEBUG) console.info('[realtime] cambio en minute, refetching');
+          void mutate();
+        }
+      )
       .subscribe();
     return () => {
       supabase.removeChannel(ch);
