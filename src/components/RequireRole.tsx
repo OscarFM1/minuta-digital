@@ -60,7 +60,10 @@ export default function RequireRole({
       const { data: auth } = await supabase.auth.getUser()
       const user = auth?.user
       if (!mounted) return
+
       if (!user) {
+        // No hay sesión → vamos a login
+        setChecking(false)
         router.replace(loginPath)
         return
       }
@@ -71,25 +74,32 @@ export default function RequireRole({
         .select('role, must_change_password')
         .eq('id', user.id)
         .single()
-
       if (!mounted) return
 
       if (pErr || !prof) {
-        // Si no hay perfil, por seguridad manda a login
+        // Sin perfil → volvemos a login
+        setChecking(false)
         router.replace(loginPath)
         return
       }
 
       if (prof.must_change_password) {
-        router.replace(changePwdPath + (router.asPath ? `?go=${encodeURIComponent(router.asPath)}` : ''))
+        // El usuario debe cambiar contraseña
+        setChecking(false)
+        router.replace(
+          changePwdPath +
+            (router.asPath ? `?go=${encodeURIComponent(router.asPath)}` : '')
+        )
         return
       }
 
+      // 3) Validar rol
       const ok = allow.includes(prof.role as Role)
       setGranted(ok)
       setChecking(false)
 
       if (!ok) {
+        // Rol no permitido → 403
         router.replace(denyTo)
       }
     }
@@ -100,11 +110,11 @@ export default function RequireRole({
     }
   }, [allow, changePwdPath, denyTo, loginPath, router])
 
-  // Mientras valida, evita parpadeos de contenido
+  // Mientras valida, mostramos spinner
   if (checking) {
     return (
       <div style={{ display: 'grid', placeItems: 'center', minHeight: 200 }}>
-        <div style={{ opacity: .7, fontSize: 14 }}>Verificando permisos…</div>
+        <div style={{ opacity: 0.7, fontSize: 14 }}>Verificando permisos…</div>
       </div>
     )
   }
