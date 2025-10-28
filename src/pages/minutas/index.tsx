@@ -20,7 +20,8 @@ import { useFirstLoginGate } from '@/hooks/useFirstLoginGate';
 import AdminResetPassword from '@/components/AdminResetPassword';
 import RequireRole from '@/components/RequireRole';
 
-const DEBUG = true;
+// solo mostramos DEBUG en modo development
+const DEBUG = process.env.NODE_ENV === 'development';
 
 /* ---- Fechas ---- */
 const toISODate = (d: Date) => d.toISOString().slice(0, 10);
@@ -97,7 +98,9 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
 
     let rawItems: RpcAdminItem[] = [];
     if (Array.isArray(data)) {
-      rawItems = Array.isArray(data[0]?.items) ? data[0].items : (data as RpcAdminItem[]);
+      rawItems = Array.isArray(data[0]?.items)
+        ? data[0].items
+        : (data as RpcAdminItem[]);
     } else if (Array.isArray(data.items)) {
       rawItems = data.items;
     }
@@ -339,20 +342,12 @@ function AdminMinutasView() {
 
         <Col md={3} lg={3}>
           <Form.Label>Desde</Form.Label>
-          <Form.Control
-            type="date"
-            value={filters.desde ?? ''}
-            onChange={handleDesde}
-          />
+          <Form.Control type="date" value={filters.desde ?? ''} onChange={handleDesde} />
         </Col>
 
         <Col md={3} lg={3}>
           <Form.Label>Hasta</Form.Label>
-          <Form.Control
-            type="date"
-            value={filters.hasta ?? ''}
-            onChange={handleHasta}
-          />
+          <Form.Control type="date" value={filters.hasta ?? ''} onChange={handleHasta} />
         </Col>
 
         <Col md={1} lg={2} className="d-flex gap-2">
@@ -366,9 +361,7 @@ function AdminMinutasView() {
       </Row>
 
       {error && (
-        <p className="text-danger mt-3">
-          Error al cargar minutas: {String(error.message || error)}
-        </p>
+        <p className="text-danger mt-3">Error al cargar minutas: {String(error.message || error)}</p>
       )}
       {isLoading && <p className="mt-3">Cargando…</p>}
       {!isLoading && !error && (items?.length ?? 0) === 0 && (
