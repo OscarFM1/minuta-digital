@@ -87,6 +87,8 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
   };
   if (DEBUG) console.info('[fetchMinutes] payload', payload);
 
+  let items: MinuteCardData[] = [];
+
   // 1) RPC con fallback
   try {
     const data: any = await rpcWithFallback(
@@ -107,7 +109,7 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
 
     if (DEBUG) console.info('[fetchMinutes] RPC count', rawItems.length, rawItems);
     if (rawItems.length) {
-      return rawItems.map((r) => ({
+      items = rawItems.map((r) => ({
         id: r.id,
         date: r.date,
         start_time: r.start_time,
@@ -115,51 +117,61 @@ async function fetchMinutes(filters: Filters): Promise<MinuteCardData[]> {
         description: r.description ?? r.tarea_realizada ?? null,
         adjuntos: r.attachments_count.length,
         user_name: r.created_by_name || r.created_by_email || 'Sin nombre',
+        // descartamos folio_serial del servidor y lo calculamos abajo
         folio: r.folio ?? undefined,
-        folio_serial:
-          typeof r.folio_serial === 'number' ? r.folio_serial : undefined,
+        folio_serial: 0,
       }));
+    } else {
+      console.warn('[fetchMinutes] RPC devolvió 0 filas → fallback');
     }
-    console.warn('[fetchMinutes] RPC devolvió 0 filas → fallback');
   } catch (e) {
     console.warn('[fetchMinutes] error RPC → fallback', e);
   }
 
-  // 2) Fallback directo a tabla `minute`
-  const res = await supabase
-    .from('minute')
-    .select(`
-      id,
-      date,
-      start_time,
-      end_time,
-      description,
-      tarea_realizada,
-      created_by_name,
-      created_by_email,
-      folio,
-      folio_serial,
-      attachments_count:attachment!inner(id)
-    `);
-  if (res.error) {
-    console.error('[fetchMinutes] fallback error', res.error);
-    throw res.error;
+  // 2) fallback directo si RPC no devolvió nada
+  if (items.length === 0) {
+    const res = await supabase
+      .from('minute')
+      .select(`
+        id,
+        date,
+        start_time,
+        end_time,
+        description,
+        tarea_realizada,
+        created_by_name,
+        created_by_email,
+        folio,
+        attachments_count:attachment!inner(id)
+      `);
+    if (res.error) {
+      console.error('[fetchMinutes] fallback error', res.error);
+      throw res.error;
+    }
+    const rows = res.data as RpcAdminItem[];
+    if (DEBUG) console.info('[fetchMinutes] fallback raw rows', rows);
+    items = rows.map((r) => ({
+      id: r.id,
+      date: r.date,
+      start_time: r.start_time,
+      end_time: r.end_time,
+      description: r.description ?? r.tarea_realizada ?? null,
+      adjuntos: r.attachments_count.length,
+      user_name: r.created_by_name || r.created_by_email || 'Sin nombre',
+      folio: r.folio ?? undefined,
+      folio_serial: 0,
+    }));
   }
-  if (DEBUG) console.info('[fetchMinutes] fallback raw rows', res.data);
 
-  const rows = res.data as RpcAdminItem[];
-  if (DEBUG) console.info('[fetchMinutes] fallback count', rows.length);
-  return rows.map((r) => ({
-    id: r.id,
-    date: r.date,
-    start_time: r.start_time,
-    end_time: r.end_time,
-    description: r.description ?? r.tarea_realizada ?? null,
-    adjuntos: r.attachments_count.length,
-    user_name: r.created_by_name || r.created_by_email || 'Sin nombre',
-    folio: r.folio ?? undefined,
-    folio_serial:
-      typeof r.folio_serial === 'number' ? r.folio_serial : undefined,
+  // --- ahora ordenamos y asignamos folio_serial único de 1...N ---
+  items.sort((a, b) => {
+    const da = new Date(`${a.date}T${a.start_time ?? '00:00'}`);
+    const db = new Date(`${b.date}T${b.start_time ?? '00:00'}`);
+    return db.getTime() - da.getTime();
+  });
+  return items.map((m, i) => ({
+    ...m,
+    folio_serial: i + 1,
   }));
 }
 
@@ -339,7 +351,6 @@ function AdminMinutasView() {
           </InputGroup>
           <Form.Text>Selecciona del listado (UUID interno).</Form.Text>
         </Col>
-
         <Col md={3} lg={3}>
           <Form.Label>Desde</Form.Label>
           <Form.Control
@@ -348,7 +359,6 @@ function AdminMinutasView() {
             onChange={handleDesde}
           />
         </Col>
-
         <Col md={3} lg={3}>
           <Form.Label>Hasta</Form.Label>
           <Form.Control
@@ -357,7 +367,6 @@ function AdminMinutasView() {
             onChange={handleHasta}
           />
         </Col>
-
         <Col md={1} lg={2} className="d-flex gap-2">
           <Button variant="outline-secondary" onClick={clearFilters}>
             Limpiar
